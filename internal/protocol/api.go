@@ -98,6 +98,20 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 		return nil, &StreamResult{Items: StreamImageChunks(outputs), Err: errCh, Kind: "openai"}, nil
 	}
 	result, err := e.CollectImageOutputsWithProgress(outputs, errCh, imageOutputProgressCallback(body))
+	if err == nil && result != nil {
+		// 将输入图片的字节数计入 prompt_tokens
+		inputImageBytes := 0
+		for _, img := range images {
+			inputImageBytes += len(img.Data)
+		}
+		if usage, ok := result["usage"].(map[string]any); ok {
+			promptTokens := util.ToInt(usage["prompt_tokens"], 0)
+			promptTokens += inputImageBytes / 3 // 图片字节数按 base64 token 换算
+			completionTokens := util.ToInt(usage["completion_tokens"], 0)
+			usage["prompt_tokens"] = promptTokens
+			usage["total_tokens"] = promptTokens + completionTokens
+		}
+	}
 	return result, nil, err
 }
 
