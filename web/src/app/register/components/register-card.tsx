@@ -121,8 +121,32 @@ export function RegisterCard() {
           <div className="space-y-3 border-t border-border pt-3">
             <div className="flex items-center justify-between gap-3">
               <div>
+                <h3 className="text-sm font-semibold text-stone-800">定时注册</h3>
+                <p className="mt-1 text-xs text-stone-500">在指定北京时间窗口内自动执行注册，开始前 3 分钟自动暂停手动任务。</p>
+              </div>
+              <Checkbox checked={Boolean(config.schedule?.enabled)} onCheckedChange={(checked) => setMailField("__schedule_enabled", String(checked))} disabled={config.enabled} />
+            </div>
+            <div className="grid gap-4 md:grid-cols-3">
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">开始时间 (北京时间)</label>
+                <Input type="time" value={String(config.schedule?.start_time ?? "08:00")} onChange={(event) => setMailField("__schedule_start_time", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || !config.schedule?.enabled} />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">结束时间 (北京时间)</label>
+                <Input type="time" value={String(config.schedule?.end_time ?? "10:00")} onChange={(event) => setMailField("__schedule_end_time", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || !config.schedule?.enabled} />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">线程数</label>
+                <Input type="number" value={String(config.schedule?.threads ?? 32)} onChange={(event) => setMailField("__schedule_threads", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || !config.schedule?.enabled} />
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-3 border-t border-border pt-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
                 <h3 className="text-sm font-semibold text-stone-800">邮箱配置</h3>
-                <p className="mt-1 text-xs text-stone-500">可配置多个 provider，按启用顺序轮换。</p>
+                <p className="mt-1 text-xs text-stone-500">可配置多个 provider，按权重加权随机分配。</p>
               </div>
               <Button type="button" variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-3 text-stone-700" onClick={addProvider} disabled={config.enabled}>
                 <Plus className="size-4" />
@@ -164,9 +188,15 @@ export function RegisterCard() {
                         <Checkbox checked={Boolean(provider.enable)} onCheckedChange={(checked) => updateProvider(index, { enable: Boolean(checked) })} disabled={config.enabled} />
                         启用
                       </label>
-                      <button type="button" className="rounded-lg p-2 text-stone-400 transition hover:bg-rose-50 hover:text-rose-500 disabled:opacity-50" onClick={() => deleteProvider(index)} disabled={config.enabled || providers.length <= 1} title="删除 provider">
-                        <Trash2 className="size-4" />
-                      </button>
+                      <div className="flex items-center gap-3">
+                        <label className="flex items-center gap-2 text-sm text-stone-700">
+                          权重
+                          <Input type="number" min={1} max={10} value={String(provider.weight ?? 5)} onChange={(event) => updateProvider(index, { weight: Math.min(10, Math.max(1, Number(event.target.value) || 5)) })} className="h-8 w-16 rounded-lg border-stone-200 bg-white text-center" disabled={config.enabled} />
+                        </label>
+                        <button type="button" className="rounded-lg p-2 text-stone-400 transition hover:bg-rose-50 hover:text-rose-500 disabled:opacity-50" onClick={() => deleteProvider(index)} disabled={config.enabled || providers.length <= 1} title="删除 provider">
+                          <Trash2 className="size-4" />
+                        </button>
+                      </div>
                     </div>
 
                     <div className="grid gap-4 md:grid-cols-2">
@@ -266,6 +296,14 @@ export function RegisterCard() {
               <Badge variant={config.enabled ? "success" : "secondary"} className="rounded-md">
                 {config.enabled ? "运行中" : "已停止"}
               </Badge>
+              {config.schedule?.enabled && (
+                <Badge variant={stats.scheduled_status === "running" ? "success" : "secondary"} className="rounded-md">
+                  {stats.scheduled_status === "running" ? "定时运行中" : stats.scheduled_status === "waiting" ? "定时等待中" : "定时已启用"}
+                </Badge>
+              )}
+              {stats.manual_paused && (
+                <Badge variant="warning" className="rounded-md">已暂停(定时抢占)</Badge>
+              )}
             </div>
             <div className="grid grid-cols-4 gap-2">
               {[

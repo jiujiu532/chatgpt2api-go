@@ -539,6 +539,12 @@ export type RegisterConfig = {
   target_quota: number;
   target_available: number;
   check_interval: number;
+  schedule?: {
+    enabled: boolean;
+    start_time: string;
+    end_time: string;
+    threads: number;
+  };
   stats: {
     job_id?: string;
     success: number;
@@ -554,6 +560,11 @@ export type RegisterConfig = {
     started_at?: string;
     updated_at?: string;
     finished_at?: string;
+    scheduled_status?: "idle" | "waiting" | "running" | "ended";
+    scheduled_success?: number;
+    scheduled_fail?: number;
+    manual_paused?: boolean;
+    manual_paused_reason?: string;
   };
   logs?: Array<{
     time: string;

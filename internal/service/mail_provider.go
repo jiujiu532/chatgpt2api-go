@@ -25,10 +25,8 @@ import (
 )
 
 var (
-	registerMailDomainMu    sync.Mutex
-	registerMailProviderMu  sync.Mutex
-	registerMailDomainSeq   int
-	registerMailProviderSeq int
+	registerMailDomainMu sync.Mutex
+	registerMailDomainSeq int
 
 	registerMailCodePatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?is)background-color:\s*#F3F3F3[^>]*>[\s\S]*?(\d{6})[\s\S]*?</p>`),
@@ -257,11 +255,36 @@ func selectRegisterMailEntry(mailConfig map[string]any, providerName, providerRe
 	if len(enabled) == 1 {
 		return util.CopyMap(enabled[0]), nil
 	}
-	registerMailProviderMu.Lock()
-	entry := util.CopyMap(enabled[registerMailProviderSeq%len(enabled)])
-	registerMailProviderSeq = (registerMailProviderSeq + 1) % len(enabled)
-	registerMailProviderMu.Unlock()
-	return entry, nil
+	// 加权随机选择
+	return weightedRandomSelect(enabled), nil
+}
+
+// weightedRandomSelect 根据 weight 字段加权随机选择一个 provider
+func weightedRandomSelect(entries []map[string]any) map[string]any {
+	totalWeight := 0
+	for _, entry := range entries {
+		totalWeight += clampWeight(util.ToInt(entry["weight"], 5))
+	}
+	r := rand.Intn(totalWeight)
+	for _, entry := range entries {
+		w := clampWeight(util.ToInt(entry["weight"], 5))
+		r -= w
+		if r < 0 {
+			return util.CopyMap(entry)
+		}
+	}
+	return util.CopyMap(entries[len(entries)-1])
+}
+
+// clampWeight 将权重值限制在 1-10 范围内
+func clampWeight(w int) int {
+	if w < 1 {
+		return 1
+	}
+	if w > 10 {
+		return 10
+	}
+	return w
 }
 
 func extractRegisterMailCode(message map[string]any) string {

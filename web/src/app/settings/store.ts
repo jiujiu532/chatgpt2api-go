@@ -169,7 +169,7 @@ type SettingsStore = {
   setRegisterTargetQuota: (value: string) => void;
   setRegisterTargetAvailable: (value: string) => void;
   setRegisterCheckInterval: (value: string) => void;
-  setRegisterMailField: (key: "request_timeout" | "wait_timeout" | "wait_interval", value: string) => void;
+  setRegisterMailField: (key: string, value: string) => void;
   addRegisterProvider: () => void;
   updateRegisterProvider: (index: number, updates: Record<string, unknown>) => void;
   deleteRegisterProvider: (index: number) => void;
@@ -567,12 +567,28 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   setRegisterMailField: (key, value) => {
-    set((state) => state.registerConfig ? {
-      registerConfig: {
-        ...state.registerConfig,
-        mail: { ...state.registerConfig.mail, [key]: Number(value) || 0 },
-      },
-    } : {});
+    set((state) => {
+      if (!state.registerConfig) return {};
+      // 处理定时注册配置字段
+      if (key.startsWith("__schedule_")) {
+        const scheduleKey = key.replace("__schedule_", "");
+        const schedule = { ...(state.registerConfig.schedule || { enabled: false, start_time: "08:00", end_time: "10:00", threads: 32 }) };
+        if (scheduleKey === "enabled") {
+          schedule.enabled = value === "true";
+        } else if (scheduleKey === "threads") {
+          schedule.threads = Math.max(1, Number(value) || 32);
+        } else {
+          (schedule as Record<string, unknown>)[scheduleKey] = value;
+        }
+        return { registerConfig: { ...state.registerConfig, schedule } };
+      }
+      return {
+        registerConfig: {
+          ...state.registerConfig,
+          mail: { ...state.registerConfig.mail, [key]: Number(value) || 0 },
+        },
+      };
+    });
   },
 
   addRegisterProvider: () => {
@@ -625,6 +641,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
         target_available: Math.max(1, Number(registerConfig.target_available) || 1),
         check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
+        schedule: registerConfig.schedule,
       });
       set({ registerConfig: data.register });
       toast.success("注册配置已保存");
@@ -650,6 +667,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
           target_available: Math.max(1, Number(registerConfig.target_available) || 1),
           check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
+          schedule: registerConfig.schedule,
         });
       }
       const data = registerConfig.enabled ? await stopRegister() : await startRegister();
