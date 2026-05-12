@@ -129,15 +129,15 @@ export function RegisterCard() {
             <div className="grid gap-4 md:grid-cols-3">
               <div className="space-y-2">
                 <label className="text-sm text-stone-700">开始时间 (北京时间)</label>
-                <Input type="time" value={String(config.schedule?.start_time ?? "08:00")} onChange={(event) => setMailField("__schedule_start_time", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || !config.schedule?.enabled} />
+                <Input type="time" value={String(config.schedule?.start_time ?? "08:00")} onChange={(event) => setMailField("__schedule_start_time", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
               </div>
               <div className="space-y-2">
                 <label className="text-sm text-stone-700">结束时间 (北京时间)</label>
-                <Input type="time" value={String(config.schedule?.end_time ?? "10:00")} onChange={(event) => setMailField("__schedule_end_time", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || !config.schedule?.enabled} />
+                <Input type="time" value={String(config.schedule?.end_time ?? "10:00")} onChange={(event) => setMailField("__schedule_end_time", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
               </div>
               <div className="space-y-2">
                 <label className="text-sm text-stone-700">线程数</label>
-                <Input type="number" value={String(config.schedule?.threads ?? 32)} onChange={(event) => setMailField("__schedule_threads", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || !config.schedule?.enabled} />
+                <Input type="number" value={String(config.schedule?.threads ?? 32)} onChange={(event) => setMailField("__schedule_threads", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
               </div>
             </div>
           </div>
