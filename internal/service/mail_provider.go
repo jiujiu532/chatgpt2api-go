@@ -1190,7 +1190,8 @@ func (p *registerMoEmailProvider) FetchAvailableDomains() ([]string, error) {
 	if apiBase == "" {
 		return nil, fmt.Errorf("moemail api_base is required")
 	}
-	data, err := registerMailRequestAny(p.client, http.MethodGet, apiBase+"/api/emails/domains", map[string]string{
+	// MoeMail 通过 /api/config 接口获取域名列表（emailDomains 字段，逗号分隔）
+	data, err := registerMailRequestJSON(p.client, http.MethodGet, apiBase+"/api/config", map[string]string{
 		"X-API-Key":  util.Clean(p.entry["api_key"]),
 		"User-Agent": p.conf.UserAgent,
 		"Accept":     "application/json",
@@ -1198,23 +1199,15 @@ func (p *registerMoEmailProvider) FetchAvailableDomains() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	items := util.AsMapSlice(data)
-	var domains []string
-	for _, item := range items {
-		domain := util.Clean(item["domain"])
-		if domain == "" {
-			domain = util.Clean(item["name"])
-		}
-		if domain != "" {
-			domains = append(domains, domain)
-		}
+	// emailDomains 是逗号分隔的字符串
+	domainStr := util.Clean(data["emailDomains"])
+	if domainStr == "" {
+		return nil, nil
 	}
-	// 如果返回的是字符串数组而非对象数组
-	if len(domains) == 0 {
-		for _, s := range util.AsStringSlice(data) {
-			if s = strings.TrimSpace(s); s != "" {
-				domains = append(domains, s)
-			}
+	var domains []string
+	for _, d := range strings.Split(domainStr, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			domains = append(domains, d)
 		}
 	}
 	return domains, nil
