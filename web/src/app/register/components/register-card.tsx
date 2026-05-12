@@ -54,6 +54,9 @@ export function RegisterCard() {
       ...(type === "moemail" ? { api_base: "", api_key: "", domain: [], expiry_time: 0 } : {}),
       ...(type === "inbucket" ? { api_base: "", domain: [], random_subdomain: true } : {}),
       ...(type === "yyds_mail" ? { api_base: "https://maliapi.215.im/v1", api_key: "", domain: [], subdomain: "", wildcard: false } : {}),
+      ...(type === "mail_tm" ? { api_base: "", domain: [] } : {}),
+      ...(type === "mail_gw" ? { api_base: "", domain: [] } : {}),
+      ...(type === "guerrilla_mail" ? { api_base: "" } : {}),
     });
   };
 
@@ -151,7 +154,7 @@ export function RegisterCard() {
                     ? "每行一个基础域名，系统会自动生成随机子域名"
                     : type === "tempmail_lol"
                       ? "每行一个域名，留空则从服务可用域名中随机分配"
-                      : type === "duckmail" || type === "yyds_mail" || type === "moemail" || type === "cloudflare_temp_email"
+                      : type === "duckmail" || type === "yyds_mail" || type === "moemail" || type === "cloudflare_temp_email" || type === "mail_tm" || type === "mail_gw"
                         ? "每行一个域名，留空则从服务获取可用域名随机使用"
                         : "每行一个域名";
                 return (
@@ -181,13 +184,16 @@ export function RegisterCard() {
                             <SelectItem value="moemail">moemail</SelectItem>
                             <SelectItem value="inbucket">inbucket</SelectItem>
                             <SelectItem value="yyds_mail">yyds_mail</SelectItem>
+                            <SelectItem value="mail_tm">mail_tm</SelectItem>
+                            <SelectItem value="mail_gw">mail_gw</SelectItem>
+                            <SelectItem value="guerrilla_mail">guerrilla_mail</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
-                      {type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" ? (
+                      {type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "mail_tm" || type === "mail_gw" || type === "guerrilla_mail" ? (
                         <div className="space-y-2">
                           <label className="text-sm text-stone-700">API Base</label>
-                          <Input value={String(provider.api_base || "")} onChange={(event) => updateProvider(index, { api_base: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                          <Input value={String(provider.api_base || "")} onChange={(event) => updateProvider(index, { api_base: event.target.value })} placeholder={type === "mail_tm" ? "https://api.mail.tm" : type === "mail_gw" ? "https://api.mail.gw" : type === "guerrilla_mail" ? "https://api.guerrillamail.com" : ""} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
                         </div>
                       ) : null}
                       {type === "cloudflare_temp_email" ? (
@@ -236,7 +242,7 @@ export function RegisterCard() {
                       ) : null}
                     </div>
 
-                    {type === "tempmail_lol" || type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" ? (
+                    {type === "tempmail_lol" || type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "mail_tm" || type === "mail_gw" ? (
                       <div className="space-y-2">
                         <label className="text-sm text-stone-700">{type === "inbucket" ? "基础域名列表" : "Domain"}</label>
                         <Textarea value={domains} onChange={(event) => updateProvider(index, { domain: event.target.value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean) })} placeholder={domainPlaceholder} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />

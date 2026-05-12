@@ -109,6 +109,16 @@ type registerYYDSMailProvider struct {
 	entry map[string]any
 }
 
+type registerMailTMProvider struct {
+	registerHTTPMailProvider
+	entry map[string]any
+}
+
+type registerGuerrillaMailProvider struct {
+	registerHTTPMailProvider
+	entry map[string]any
+}
+
 func createRegisterMailbox(mailConfig map[string]any, username string) (map[string]any, error) {
 	provider, err := createRegisterMailProvider(mailConfig, "", "")
 	if err != nil {
@@ -170,6 +180,10 @@ func createRegisterMailProvider(mailConfig map[string]any, providerName, provide
 		return &registerInbucketMailProvider{registerHTTPMailProvider: base, entry: entry}, nil
 	case "yyds_mail":
 		return &registerYYDSMailProvider{registerHTTPMailProvider: base, entry: entry}, nil
+	case "mail_tm", "mail_gw":
+		return &registerMailTMProvider{registerHTTPMailProvider: base, entry: entry}, nil
+	case "guerrilla_mail":
+		return &registerGuerrillaMailProvider{registerHTTPMailProvider: base, entry: entry}, nil
 	default:
 		return nil, fmt.Errorf("unsupported mail.provider: %s", util.Clean(entry["type"]))
 	}
@@ -1469,4 +1483,295 @@ func firstNonNil(values ...any) any {
 		}
 	}
 	return nil
+}
+
+// ==================== Mail.tm / Mail.gw Provider ====================
+// API 完全兼容，通过 api_base 区分：
+// - mail_tm: https://api.mail.tm
+// - mail_gw: https://api.mail.gw
+
+func (p *registerMailTMProvider) apiBase() string {
+	if base := util.Clean(p.entry["api_base"]); base != "" {
+		return strings.TrimRight(base, "/")
+	}
+	if util.Clean(p.entry["type"]) == "mail_gw" {
+		return "https://api.mail.gw"
+	}
+	return "https://api.mail.tm"
+}
+
+func (p *registerMailTMProvider) CreateMailbox(username string) (map[string]any, error) {
+	base := p.apiBase()
+	// 获取可用域名
+	domains := util.AsStringSlice(p.entry["domain"])
+	var domain string
+	if len(domains) > 0 {
+		domain = domains[rand.Intn(len(domains))]
+	} else {
+		domain = fetchOrFallbackDomain(p)
+	}
+	if domain == "" {
+		return nil, fmt.Errorf("mail_tm/mail_gw: no available domain")
+	}
+	address := firstNonEmpty(strings.TrimSpace(username), registerRandomMailboxName()) + "@" + domain
+	password := randomAlphaNum(12)
+	// 创建账号
+	_, err := registerMailRequestJSON(p.client, http.MethodPost, base+"/accounts", map[string]string{
+		"Content-Type": "application/json",
+		"User-Agent":   p.conf.UserAgent,
+		"Accept":       "application/json",
+	}, nil, map[string]any{"address": address, "password": password}, http.StatusOK, http.StatusCreated)
+	if err != nil {
+		return nil, fmt.Errorf("mail_tm create account: %w", err)
+	}
+	// 获取 token
+	tokenData, err := registerMailRequestJSON(p.client, http.MethodPost, base+"/token", map[string]string{
+		"Content-Type": "application/json",
+		"User-Agent":   p.conf.UserAgent,
+		"Accept":       "application/json",
+	}, nil, map[string]any{"address": address, "password": password}, http.StatusOK)
+	if err != nil {
+		return nil, fmt.Errorf("mail_tm get token: %w", err)
+	}
+	token := util.Clean(tokenData["token"])
+	if token == "" {
+		return nil, fmt.Errorf("mail_tm/mail_gw: token response missing token")
+	}
+	return map[string]any{
+		"provider":     util.Clean(p.entry["type"]),
+		"provider_ref": p.entry["provider_ref"],
+		"address":      address,
+		"token":        token,
+		"password":     password,
+	}, nil
+}
+
+func (p *registerMailTMProvider) FetchLatestMessage(mailbox map[string]any) (map[string]any, error) {
+	base := p.apiBase()
+	token := util.Clean(mailbox["token"])
+	// 获取消息列表
+	data, err := registerMailRequestJSON(p.client, http.MethodGet, base+"/messages", map[string]string{
+		"Authorization": "Bearer " + token,
+		"User-Agent":    p.conf.UserAgent,
+		"Accept":        "application/json",
+	}, nil, nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	items := util.AsMapSlice(data["hydra:member"])
+	if len(items) == 0 {
+		return nil, nil
+	}
+	latest := latestRegisterMailMessage(items)
+	// 获取消息详情
+	messageID := util.Clean(latest["id"])
+	if messageID != "" {
+		detail, detailErr := registerMailRequestJSON(p.client, http.MethodGet, base+"/messages/"+messageID, map[string]string{
+			"Authorization": "Bearer " + token,
+			"User-Agent":    p.conf.UserAgent,
+			"Accept":        "application/json",
+		}, nil, nil, http.StatusOK)
+		if detailErr == nil && len(detail) > 0 {
+			latest = detail
+		}
+	}
+	textContent := util.Clean(latest["text"])
+	htmlContent := ""
+	// html 字段可能是字符串数组
+	switch h := latest["html"].(type) {
+	case string:
+		htmlContent = h
+	case []any:
+		var parts []string
+		for _, part := range h {
+			if s, ok := part.(string); ok {
+				parts = append(parts, s)
+			}
+		}
+		htmlContent = strings.Join(parts, "")
+	}
+	if textContent == "" && htmlContent == "" {
+		textContent, htmlContent = extractRegisterMailContent(latest)
+	}
+	sender := ""
+	if fromMap, ok := latest["from"].(map[string]any); ok {
+		sender = firstNonEmpty(util.Clean(fromMap["address"]), util.Clean(fromMap["name"]))
+	}
+	return map[string]any{
+		"provider":     util.Clean(p.entry["type"]),
+		"mailbox":      util.Clean(mailbox["address"]),
+		"message_id":   messageID,
+		"subject":      util.Clean(latest["subject"]),
+		"sender":       sender,
+		"text_content": textContent,
+		"html_content": htmlContent,
+		"received_at":  firstNonNil(latest["createdAt"], latest["created_at"], latest["date"]),
+		"raw":          latest,
+	}, nil
+}
+
+func (p *registerMailTMProvider) FetchAvailableDomains() ([]string, error) {
+	base := p.apiBase()
+	data, err := registerMailRequestJSON(p.client, http.MethodGet, base+"/domains", map[string]string{
+		"User-Agent": p.conf.UserAgent,
+		"Accept":     "application/json",
+	}, nil, nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	members := util.AsMapSlice(data["hydra:member"])
+	var domains []string
+	for _, item := range members {
+		if !util.ToBool(item["isActive"]) {
+			continue
+		}
+		domain := util.Clean(item["domain"])
+		if domain != "" {
+			domains = append(domains, domain)
+		}
+	}
+	// 如果没有 isActive 字段，取所有 domain
+	if len(domains) == 0 {
+		for _, item := range members {
+			domain := util.Clean(item["domain"])
+			if domain != "" {
+				domains = append(domains, domain)
+			}
+		}
+	}
+	return domains, nil
+}
+
+// ==================== GuerrillaMail Provider ====================
+// 基于 session/cookie 的 API
+
+func (p *registerGuerrillaMailProvider) apiBase() string {
+	if base := util.Clean(p.entry["api_base"]); base != "" {
+		return strings.TrimRight(base, "/")
+	}
+	return "https://api.guerrillamail.com"
+}
+
+func (p *registerGuerrillaMailProvider) CreateMailbox(username string) (map[string]any, error) {
+	base := p.apiBase()
+	// 获取邮箱地址
+	params := map[string]string{
+		"f":     "get_email_address",
+		"ip":    "127.0.0.1",
+		"agent": p.conf.UserAgent,
+	}
+	data, err := registerMailRequestJSON(p.client, http.MethodGet, base+"/ajax.php", map[string]string{
+		"User-Agent": p.conf.UserAgent,
+		"Accept":     "application/json",
+	}, params, nil, http.StatusOK)
+	if err != nil {
+		return nil, fmt.Errorf("guerrilla_mail get_email_address: %w", err)
+	}
+	address := util.Clean(data["email_addr"])
+	sidToken := util.Clean(data["sid_token"])
+	if address == "" {
+		return nil, fmt.Errorf("guerrilla_mail: response missing email_addr")
+	}
+	// 如果用户指定了 username，设置邮箱用户名
+	if username = strings.TrimSpace(username); username != "" {
+		setParams := map[string]string{
+			"f":          "set_email_user",
+			"ip":         "127.0.0.1",
+			"agent":      p.conf.UserAgent,
+			"email_user": username,
+			"lang":       "en",
+		}
+		if sidToken != "" {
+			setParams["sid_token"] = sidToken
+		}
+		setData, setErr := registerMailRequestJSON(p.client, http.MethodGet, base+"/ajax.php", map[string]string{
+			"User-Agent": p.conf.UserAgent,
+			"Accept":     "application/json",
+		}, setParams, nil, http.StatusOK)
+		if setErr == nil {
+			if newAddr := util.Clean(setData["email_addr"]); newAddr != "" {
+				address = newAddr
+			}
+			if newSid := util.Clean(setData["sid_token"]); newSid != "" {
+				sidToken = newSid
+			}
+		}
+	}
+	return map[string]any{
+		"provider":     "guerrilla_mail",
+		"provider_ref": p.entry["provider_ref"],
+		"address":      address,
+		"sid_token":    sidToken,
+	}, nil
+}
+
+func (p *registerGuerrillaMailProvider) FetchLatestMessage(mailbox map[string]any) (map[string]any, error) {
+	base := p.apiBase()
+	sidToken := util.Clean(mailbox["sid_token"])
+	// 检查新邮件
+	params := map[string]string{
+		"f":     "check_email",
+		"ip":    "127.0.0.1",
+		"agent": p.conf.UserAgent,
+		"seq":   "0",
+	}
+	if sidToken != "" {
+		params["sid_token"] = sidToken
+	}
+	data, err := registerMailRequestJSON(p.client, http.MethodGet, base+"/ajax.php", map[string]string{
+		"User-Agent": p.conf.UserAgent,
+		"Accept":     "application/json",
+	}, params, nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	items := util.AsMapSlice(data["list"])
+	if len(items) == 0 {
+		return nil, nil
+	}
+	// 取最新的一封
+	latest := items[0]
+	mailID := util.Clean(latest["mail_id"])
+	if mailID == "" {
+		return nil, nil
+	}
+	// 获取邮件详情
+	fetchParams := map[string]string{
+		"f":        "fetch_email",
+		"ip":       "127.0.0.1",
+		"agent":    p.conf.UserAgent,
+		"email_id": mailID,
+	}
+	if sidToken != "" {
+		fetchParams["sid_token"] = sidToken
+	}
+	message, fetchErr := registerMailRequestJSON(p.client, http.MethodGet, base+"/ajax.php", map[string]string{
+		"User-Agent": p.conf.UserAgent,
+		"Accept":     "application/json",
+	}, fetchParams, nil, http.StatusOK)
+	if fetchErr != nil {
+		// 降级使用列表中的信息
+		message = latest
+	}
+	textContent := util.Clean(message["mail_body"])
+	htmlContent := ""
+	if textContent == "" {
+		textContent, htmlContent = extractRegisterMailContent(message)
+	}
+	// 如果 mail_body 包含 HTML 标签，当作 html 处理
+	if strings.Contains(textContent, "<") && strings.Contains(textContent, ">") {
+		htmlContent = textContent
+		textContent = ""
+	}
+	return map[string]any{
+		"provider":     "guerrilla_mail",
+		"mailbox":      util.Clean(mailbox["address"]),
+		"message_id":   mailID,
+		"subject":      util.Clean(firstNonNil(message["mail_subject"], latest["mail_subject"])),
+		"sender":       util.Clean(firstNonNil(message["mail_from"], latest["mail_from"])),
+		"text_content": textContent,
+		"html_content": htmlContent,
+		"received_at":  firstNonNil(message["mail_timestamp"], latest["mail_timestamp"]),
+		"raw":          message,
+	}, nil
 }
