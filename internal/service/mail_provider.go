@@ -36,6 +36,11 @@ var (
 		regexp.MustCompile(`(?is)>\s*(\d{6})\s*<`),
 		regexp.MustCompile(`\b(\d{6})\b`),
 	}
+
+	// GPTMail 公共 API Key 缓存
+	gptMailPublicKeyMu      sync.Mutex
+	gptMailPublicKeyCached  string
+	gptMailPublicKeyFetched time.Time
 )
 
 type registerMailboxProvider interface {
@@ -930,7 +935,64 @@ func (p *registerDuckMailProvider) FetchAvailableDomains() ([]string, error) {
 	return domains, nil
 }
 
+func (p *registerGPTMailProvider) resolveAPIKey() string {
+	key := util.Clean(p.entry["api_key"])
+	if key != "" && key != "PUBLIC_API_KEY" {
+		return key
+	}
+	// 使用公共 key，带缓存（北京时间每天 08:00 刷新）
+	return fetchGPTMailPublicKey(p.client, p.conf.UserAgent)
+}
+
+// fetchGPTMailPublicKey 获取 GPTMail 公共测试密钥，缓存到下一个北京时间 08:00
+func fetchGPTMailPublicKey(client *http.Client, userAgent string) string {
+	gptMailPublicKeyMu.Lock()
+	defer gptMailPublicKeyMu.Unlock()
+
+	now := time.Now()
+	// 北京时间 UTC+8
+	loc := time.FixedZone("CST", 8*3600)
+	nowCST := now.In(loc)
+	// 计算今天北京时间 08:00
+	todayReset := time.Date(nowCST.Year(), nowCST.Month(), nowCST.Day(), 8, 0, 0, 0, loc)
+	if nowCST.Before(todayReset) {
+		// 还没到今天的 08:00，上一次重置是昨天 08:00
+		todayReset = todayReset.Add(-24 * time.Hour)
+	}
+
+	// 如果缓存的 key 是在本次重置周期之后获取的，直接返回
+	if gptMailPublicKeyCached != "" && gptMailPublicKeyFetched.After(todayReset) {
+		return gptMailPublicKeyCached
+	}
+
+	// 从远程获取
+	data, err := registerMailRequestJSON(client, http.MethodGet, "https://mail.chatgpt.org.uk/api/public-key-status", map[string]string{
+		"User-Agent":          userAgent,
+		"Accept":              "application/json",
+		"X-Public-Key-Reveal": "click",
+	}, map[string]string{"reveal": "1"}, nil, http.StatusOK)
+	if err != nil {
+		// 获取失败，如果有旧缓存就继续用
+		if gptMailPublicKeyCached != "" {
+			return gptMailPublicKeyCached
+		}
+		return "PUBLIC_API_KEY"
+	}
+	inner := util.StringMap(data["data"])
+	key := util.Clean(inner["key"])
+	if key == "" {
+		if gptMailPublicKeyCached != "" {
+			return gptMailPublicKeyCached
+		}
+		return "PUBLIC_API_KEY"
+	}
+	gptMailPublicKeyCached = key
+	gptMailPublicKeyFetched = now
+	return key
+}
+
 func (p *registerGPTMailProvider) CreateMailbox(username string) (map[string]any, error) {
+	apiKey := p.resolveAPIKey()
 	payload := map[string]any{}
 	if username = strings.TrimSpace(username); username != "" {
 		payload["prefix"] = username
@@ -945,7 +1007,7 @@ func (p *registerGPTMailProvider) CreateMailbox(username string) (map[string]any
 		requestBody = payload
 	}
 	data, err := registerMailRequestAny(p.client, method, "https://mail.chatgpt.org.uk/api/generate-email", map[string]string{
-		"X-API-Key":    util.Clean(p.entry["api_key"]),
+		"X-API-Key":    apiKey,
 		"User-Agent":   p.conf.UserAgent,
 		"Accept":       "application/json",
 		"Content-Type": "application/json",
@@ -963,8 +1025,9 @@ func (p *registerGPTMailProvider) CreateMailbox(username string) (map[string]any
 }
 
 func (p *registerGPTMailProvider) FetchLatestMessage(mailbox map[string]any) (map[string]any, error) {
+	apiKey := p.resolveAPIKey()
 	data, err := registerMailRequestAny(p.client, http.MethodGet, "https://mail.chatgpt.org.uk/api/emails", map[string]string{
-		"X-API-Key":  util.Clean(p.entry["api_key"]),
+		"X-API-Key":  apiKey,
 		"User-Agent": p.conf.UserAgent,
 		"Accept":     "application/json",
 	}, map[string]string{"email": util.Clean(mailbox["address"])}, nil, http.StatusOK)
@@ -982,7 +1045,7 @@ func (p *registerGPTMailProvider) FetchLatestMessage(mailbox map[string]any) (ma
 	latest := latestRegisterMailMessage(items)
 	if id := util.Clean(latest["id"]); id != "" {
 		detail, detailErr := registerMailRequestAny(p.client, http.MethodGet, "https://mail.chatgpt.org.uk/api/email/"+id, map[string]string{
-			"X-API-Key":  util.Clean(p.entry["api_key"]),
+			"X-API-Key":  apiKey,
 			"User-Agent": p.conf.UserAgent,
 			"Accept":     "application/json",
 		}, nil, nil, http.StatusOK)

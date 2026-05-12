@@ -180,7 +180,7 @@ export function RegisterCard() {
                             <SelectItem value="cloudflare_temp_email">cloudflare_temp_email</SelectItem>
                             <SelectItem value="tempmail_lol">tempmail_lol</SelectItem>
                             <SelectItem value="duckmail">duckmail</SelectItem>
-                            <SelectItem value="gptmail">gptmail(未测试)</SelectItem>
+                            <SelectItem value="gptmail">gptmail</SelectItem>
                             <SelectItem value="moemail">moemail</SelectItem>
                             <SelectItem value="inbucket">inbucket</SelectItem>
                             <SelectItem value="yyds_mail">yyds_mail</SelectItem>
@@ -213,7 +213,7 @@ export function RegisterCard() {
                       {type === "tempmail_lol" || type === "duckmail" || type === "gptmail" || type === "moemail" || type === "yyds_mail" ? (
                         <div className="space-y-2">
                           <label className="text-sm text-stone-700">API Key</label>
-                          <Input value={String(provider.api_key || "")} onChange={(event) => updateProvider(index, { api_key: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                          <Input value={String(provider.api_key || "")} onChange={(event) => updateProvider(index, { api_key: event.target.value })} placeholder={type === "gptmail" ? "留空则自动获取公共测试密钥" : ""} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
                         </div>
                       ) : null}
                       {type === "duckmail" || type === "gptmail" ? (
