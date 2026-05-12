@@ -59,6 +59,7 @@ type RegisterService struct {
 	logs        []map[string]any
 	runnerAlive bool
 	subscribers map[chan string]struct{}
+	scheduler   *RegisterScheduler
 }
 
 type registerWorkerResult struct {
@@ -97,6 +98,9 @@ func NewRegisterService(dataDir string, accounts *AccountService, backend ...sto
 	if util.ToBool(s.config["enabled"]) {
 		s.startLocked(false)
 	}
+	// 启动定时调度器
+	s.scheduler = newRegisterScheduler(s)
+	s.scheduler.Start()
 	return s
 }
 
@@ -1026,6 +1030,12 @@ func registerDefaultConfig() map[string]any {
 		"check_interval":   5,
 		"enabled":          false,
 		"stats":            stats,
+		"schedule": map[string]any{
+			"enabled":    false,
+			"start_time": "08:00",
+			"end_time":   "10:00",
+			"threads":    32,
+		},
 	}
 }
 
@@ -1066,6 +1076,7 @@ func normalizeRegisterConfig(raw map[string]any) map[string]any {
 	cfg["check_interval"] = maxInt(1, util.ToInt(cfg["check_interval"], 5))
 	cfg["enabled"] = util.ToBool(cfg["enabled"])
 	cfg["mail"] = normalizeRegisterMailConfig(util.StringMap(cfg["mail"]))
+	cfg["schedule"] = normalizeRegisterScheduleConfig(util.StringMap(cfg["schedule"]))
 	stats := registerZeroStats(util.ToInt(cfg["threads"], 1), map[string]any{
 		"current_quota":     util.ToInt(util.StringMap(raw["stats"])["current_quota"], 0),
 		"current_available": util.ToInt(util.StringMap(raw["stats"])["current_available"], 0),
@@ -1091,6 +1102,7 @@ func normalizeRegisterMailConfig(raw map[string]any) map[string]any {
 		item := util.CopyMap(provider)
 		item["type"] = util.Clean(item["type"])
 		item["enable"] = util.ToBool(item["enable"])
+		item["weight"] = clampWeight(util.ToInt(item["weight"], 5))
 		if item["domain"] != nil {
 			item["domain"] = util.AsStringSlice(item["domain"])
 		}
