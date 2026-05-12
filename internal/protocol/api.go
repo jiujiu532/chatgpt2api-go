@@ -372,7 +372,8 @@ func (e *Engine) ImageChatResponse(ctx context.Context, body map[string]any) (ma
 	if err != nil {
 		return nil, nil, err
 	}
-	return CompletionResponse(model, ImageResultContent(result), int64(util.ToInt(result["created"], 0)), nil), nil, nil
+	// 传入 messages 以便 CompletionResponse 计算 usage token
+	return CompletionResponse(model, ImageResultContent(result), int64(util.ToInt(result["created"], 0)), messages), nil, nil
 }
 
 func (e *Engine) ImageChatEvents(ctx context.Context, body map[string]any) (<-chan map[string]any, <-chan error) {

@@ -959,6 +959,7 @@ func (e *Engine) FormatImageResultWithOptions(items []map[string]any, prompt, re
 	defaultFormat := NormalizeImageOutputFormat(options.Format)
 	hasRequestedFormat := strings.TrimSpace(options.Format) != ""
 	var data []map[string]any
+	totalImageBytes := 0
 	for _, item := range items {
 		b64 := util.Clean(item["b64_json"])
 		if b64 == "" {
@@ -1000,6 +1001,7 @@ func (e *Engine) FormatImageResultWithOptions(items []map[string]any, prompt, re
 		if responseFormat == "b64_json" {
 			responseItem["b64_json"] = base64.StdEncoding.EncodeToString(imageBytes)
 		}
+		totalImageBytes += len(imageBytes)
 		data = append(data, responseItem)
 	}
 	if created == 0 {
@@ -1008,6 +1010,17 @@ func (e *Engine) FormatImageResultWithOptions(items []map[string]any, prompt, re
 	result := map[string]any{"created": created, "data": data}
 	if message != "" && len(data) == 0 {
 		result["message"] = message
+	}
+	// 基于图片实际 base64 大小计算 token: base64 长度 = bytes*4/3, 每 4 字符约 1 token
+	promptTokens := CountTextTokens(prompt, "gpt-image-2")
+	completionTokens := totalImageBytes / 3 // bytes -> base64 chars / 4 ≈ bytes / 3
+	if completionTokens == 0 && len(data) > 0 {
+		completionTokens = len(data) * 1056 // 降级为默认估算
+	}
+	result["usage"] = map[string]any{
+		"prompt_tokens":     promptTokens,
+		"completion_tokens": completionTokens,
+		"total_tokens":      promptTokens + completionTokens,
 	}
 	return result
 }
