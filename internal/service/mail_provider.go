@@ -944,24 +944,13 @@ func (p *registerGPTMailProvider) resolveAPIKey() string {
 	return fetchGPTMailPublicKey(p.client, p.conf.UserAgent)
 }
 
-// fetchGPTMailPublicKey 获取 GPTMail 公共测试密钥，缓存到下一个北京时间 08:00
+// fetchGPTMailPublicKey 获取 GPTMail 公共测试密钥，缓存 23 小时后自动刷新
 func fetchGPTMailPublicKey(client *http.Client, userAgent string) string {
 	gptMailPublicKeyMu.Lock()
 	defer gptMailPublicKeyMu.Unlock()
 
-	now := time.Now()
-	// 北京时间 UTC+8
-	loc := time.FixedZone("CST", 8*3600)
-	nowCST := now.In(loc)
-	// 计算今天北京时间 08:00
-	todayReset := time.Date(nowCST.Year(), nowCST.Month(), nowCST.Day(), 8, 0, 0, 0, loc)
-	if nowCST.Before(todayReset) {
-		// 还没到今天的 08:00，上一次重置是昨天 08:00
-		todayReset = todayReset.Add(-24 * time.Hour)
-	}
-
-	// 如果缓存的 key 是在本次重置周期之后获取的，直接返回
-	if gptMailPublicKeyCached != "" && gptMailPublicKeyFetched.After(todayReset) {
+	// 缓存有效期 23 小时
+	if gptMailPublicKeyCached != "" && time.Since(gptMailPublicKeyFetched) < 23*time.Hour {
 		return gptMailPublicKeyCached
 	}
 
@@ -972,11 +961,10 @@ func fetchGPTMailPublicKey(client *http.Client, userAgent string) string {
 		"X-Public-Key-Reveal": "click",
 	}, map[string]string{"reveal": "1"}, nil, http.StatusOK)
 	if err != nil {
-		// 获取失败，如果有旧缓存就继续用
 		if gptMailPublicKeyCached != "" {
 			return gptMailPublicKeyCached
 		}
-		return "PUBLIC_API_KEY"
+		return ""
 	}
 	inner := util.StringMap(data["data"])
 	key := util.Clean(inner["key"])
@@ -984,10 +972,10 @@ func fetchGPTMailPublicKey(client *http.Client, userAgent string) string {
 		if gptMailPublicKeyCached != "" {
 			return gptMailPublicKeyCached
 		}
-		return "PUBLIC_API_KEY"
+		return ""
 	}
 	gptMailPublicKeyCached = key
-	gptMailPublicKeyFetched = now
+	gptMailPublicKeyFetched = time.Now()
 	return key
 }
 
