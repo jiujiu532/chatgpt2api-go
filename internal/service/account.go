@@ -759,19 +759,44 @@ func (s *AccountService) StartLimitedWatcher(ctx context.Context, interval time.
 	go func() {
 		timer := time.NewTimer(0)
 		defer timer.Stop()
+		cycle := 0
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-timer.C:
+				// 每个周期刷新限流账号
 				tokens := s.ListLimitedTokens()
 				if len(tokens) > 0 {
 					s.RefreshAccounts(ctx, tokens)
+				}
+				// 每 3 个周期刷新所有正常账号的额度
+				cycle++
+				if cycle%3 == 0 {
+					normalTokens := s.ListNormalTokens()
+					if len(normalTokens) > 0 {
+						s.RefreshAccounts(ctx, normalTokens)
+					}
 				}
 				timer.Reset(interval)
 			}
 		}
 	}()
+}
+
+// ListNormalTokens 返回所有状态为"正常"的账号 token
+func (s *AccountService) ListNormalTokens() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, item := range s.items {
+		if item["status"] == "正常" {
+			if token := util.Clean(item["access_token"]); token != "" {
+				out = append(out, token)
+			}
+		}
+	}
+	return out
 }
 
 type imageTokenReservation struct {

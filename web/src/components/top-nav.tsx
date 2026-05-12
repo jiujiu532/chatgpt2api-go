@@ -313,10 +313,12 @@ export function TopNav() {
 
     setAvailableQuota("加载中...");
     void loadQuota();
+    const interval = setInterval(handleRefresh, 30_000);
     window.addEventListener("focus", handleRefresh);
     window.addEventListener(QUOTA_REFRESH_EVENT, handleRefresh);
     return () => {
       active = false;
+      clearInterval(interval);
       window.removeEventListener("focus", handleRefresh);
       window.removeEventListener(QUOTA_REFRESH_EVENT, handleRefresh);
     };
