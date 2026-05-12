@@ -150,7 +150,7 @@ export function RegisterCard() {
                   type === "inbucket"
                     ? "每行一个基础域名，系统会自动生成随机子域名"
                     : type === "tempmail_lol"
-                      ? "每行一个域名，留空则使用服务默认域名"
+                      ? "每行一个域名，留空则从服务可用域名中随机分配"
                       : "每行一个域名";
                 return (
                   <div key={index} className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
