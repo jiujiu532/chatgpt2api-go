@@ -151,7 +151,9 @@ export function RegisterCard() {
                     ? "每行一个基础域名，系统会自动生成随机子域名"
                     : type === "tempmail_lol"
                       ? "每行一个域名，留空则从服务可用域名中随机分配"
-                      : "每行一个域名";
+                      : type === "duckmail" || type === "yyds_mail" || type === "moemail" || type === "cloudflare_temp_email"
+                        ? "每行一个域名，留空则从服务获取可用域名随机使用"
+                        : "每行一个域名";
                 return (
                   <div key={index} className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
                     <div className="flex items-center justify-between gap-3">

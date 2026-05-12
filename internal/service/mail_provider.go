@@ -44,6 +44,24 @@ type registerMailboxProvider interface {
 	Close()
 }
 
+// registerDomainFetcher 可选接口，支持从远程 API 获取可用域名列表
+type registerDomainFetcher interface {
+	FetchAvailableDomains() ([]string, error)
+}
+
+// fetchOrFallbackDomain 当用户未配置 domain 时，尝试从 API 获取可用域名随机选一个；失败则返回空字符串（降级为服务默认行为）
+func fetchOrFallbackDomain(provider registerMailboxProvider) string {
+	fetcher, ok := provider.(registerDomainFetcher)
+	if !ok {
+		return ""
+	}
+	domains, err := fetcher.FetchAvailableDomains()
+	if err != nil || len(domains) == 0 {
+		return ""
+	}
+	return domains[rand.Intn(len(domains))]
+}
+
 type registerMailSettings struct {
 	RequestTimeout time.Duration
 	WaitTimeout    time.Duration
@@ -605,9 +623,20 @@ func (p *registerHTTPMailProvider) Close() {
 func (p *registerCloudflareTempMailProvider) CreateMailbox(username string) (map[string]any, error) {
 	apiBase := strings.TrimRight(util.Clean(p.entry["api_base"]), "/")
 	adminPassword := util.Clean(p.entry["admin_password"])
-	domain, err := nextRegisterDomain(util.AsStringSlice(p.entry["domain"]))
-	if err != nil {
-		return nil, err
+	domains := util.AsStringSlice(p.entry["domain"])
+	var domain string
+	var err error
+	if len(domains) > 0 {
+		domain, err = nextRegisterDomain(domains)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// 尝试从 API 获取可用域名
+		domain = fetchOrFallbackDomain(p)
+		if domain == "" {
+			return nil, fmt.Errorf("cloudflare_temp_email domain is required (configure domain list or ensure API returns available domains)")
+		}
 	}
 	payload := map[string]any{
 		"enablePrefix": true,
@@ -667,6 +696,54 @@ func (p *registerCloudflareTempMailProvider) FetchLatestMessage(mailbox map[stri
 		"received_at":  firstNonNil(message["createdAt"], message["created_at"], message["receivedAt"], message["date"], message["timestamp"]),
 		"raw":          message,
 	}, nil
+}
+
+func (p *registerCloudflareTempMailProvider) FetchAvailableDomains() ([]string, error) {
+	apiBase := strings.TrimRight(util.Clean(p.entry["api_base"]), "/")
+	adminPassword := util.Clean(p.entry["admin_password"])
+	if apiBase == "" {
+		return nil, fmt.Errorf("cloudflare_temp_email api_base is required")
+	}
+	data, err := registerMailRequestAny(p.client, http.MethodGet, apiBase+"/admin/address", map[string]string{
+		"User-Agent":   p.conf.UserAgent,
+		"Accept":       "application/json",
+		"x-admin-auth": adminPassword,
+	}, map[string]string{"limit": "1"}, nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	// 尝试从 settings 或 domains 端点获取
+	body := util.StringMap(data)
+	items := util.AsMapSlice(body["domains"])
+	if len(items) == 0 {
+		// 尝试 /admin/domains 端点
+		data2, err2 := registerMailRequestAny(p.client, http.MethodGet, apiBase+"/admin/domains", map[string]string{
+			"User-Agent":   p.conf.UserAgent,
+			"Accept":       "application/json",
+			"x-admin-auth": adminPassword,
+		}, nil, nil, http.StatusOK)
+		if err2 == nil {
+			items = util.AsMapSlice(data2)
+		}
+	}
+	var domains []string
+	for _, item := range items {
+		domain := util.Clean(item["domain"])
+		if domain == "" {
+			domain = util.Clean(item["name"])
+		}
+		if domain != "" {
+			domains = append(domains, domain)
+		}
+	}
+	if len(domains) == 0 {
+		for _, s := range util.AsStringSlice(data) {
+			if s = strings.TrimSpace(s); s != "" {
+				domains = append(domains, s)
+			}
+		}
+	}
+	return domains, nil
 }
 
 func (p *registerTempMailLOLProvider) CreateMailbox(username string) (map[string]any, error) {
@@ -736,6 +813,10 @@ func (p *registerTempMailLOLProvider) FetchLatestMessage(mailbox map[string]any)
 func (p *registerDuckMailProvider) CreateMailbox(username string) (map[string]any, error) {
 	apiKey := util.Clean(p.entry["api_key"])
 	domain := util.Clean(p.entry["default_domain"])
+	if domain == "" {
+		// 尝试从 API 获取可用域名随机选一个
+		domain = fetchOrFallbackDomain(p)
+	}
 	if domain == "" {
 		domain = "duckmail.sbs"
 	}
@@ -812,6 +893,27 @@ func (p *registerDuckMailProvider) FetchLatestMessage(mailbox map[string]any) (m
 		"received_at":  firstNonNil(message["createdAt"], message["created_at"], message["receivedAt"], message["date"]),
 		"raw":          message,
 	}, nil
+}
+
+func (p *registerDuckMailProvider) FetchAvailableDomains() ([]string, error) {
+	apiKey := util.Clean(p.entry["api_key"])
+	data, err := registerMailRequestJSON(p.client, http.MethodGet, "https://api.duckmail.sbs/domains", map[string]string{
+		"Authorization": "Bearer " + apiKey,
+		"User-Agent":    p.conf.UserAgent,
+		"Accept":        "application/json",
+	}, nil, nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	members := util.AsMapSlice(data["hydra:member"])
+	var domains []string
+	for _, item := range members {
+		domain := util.Clean(item["domain"])
+		if domain != "" {
+			domains = append(domains, domain)
+		}
+	}
+	return domains, nil
 }
 
 func (p *registerGPTMailProvider) CreateMailbox(username string) (map[string]any, error) {
@@ -897,9 +999,20 @@ func (p *registerMoEmailProvider) CreateMailbox(username string) (map[string]any
 	if apiBase == "" {
 		return nil, fmt.Errorf("moemail api_base is required")
 	}
-	domain, err := nextRegisterDomain(util.AsStringSlice(p.entry["domain"]))
-	if err != nil {
-		return nil, err
+	domains := util.AsStringSlice(p.entry["domain"])
+	var domain string
+	var err error
+	if len(domains) > 0 {
+		domain, err = nextRegisterDomain(domains)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// 尝试从 API 获取可用域名
+		domain = fetchOrFallbackDomain(p)
+		if domain == "" {
+			return nil, fmt.Errorf("moemail domain is required (configure domain list or ensure API returns available domains)")
+		}
 	}
 	payload := map[string]any{
 		"name":       firstNonEmpty(strings.TrimSpace(username), registerRandomMailboxName()),
@@ -982,6 +1095,41 @@ func (p *registerMoEmailProvider) FetchLatestMessage(mailbox map[string]any) (ma
 		"received_at":  firstNonNil(message["createdAt"], message["created_at"], message["receivedAt"], message["date"], message["timestamp"], latest["createdAt"], latest["created_at"], latest["receivedAt"], latest["date"], latest["timestamp"]),
 		"raw":          raw,
 	}, nil
+}
+
+func (p *registerMoEmailProvider) FetchAvailableDomains() ([]string, error) {
+	apiBase := strings.TrimRight(util.Clean(p.entry["api_base"]), "/")
+	if apiBase == "" {
+		return nil, fmt.Errorf("moemail api_base is required")
+	}
+	data, err := registerMailRequestAny(p.client, http.MethodGet, apiBase+"/api/emails/domains", map[string]string{
+		"X-API-Key":  util.Clean(p.entry["api_key"]),
+		"User-Agent": p.conf.UserAgent,
+		"Accept":     "application/json",
+	}, nil, nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	items := util.AsMapSlice(data)
+	var domains []string
+	for _, item := range items {
+		domain := util.Clean(item["domain"])
+		if domain == "" {
+			domain = util.Clean(item["name"])
+		}
+		if domain != "" {
+			domains = append(domains, domain)
+		}
+	}
+	// 如果返回的是字符串数组而非对象数组
+	if len(domains) == 0 {
+		for _, s := range util.AsStringSlice(data) {
+			if s = strings.TrimSpace(s); s != "" {
+				domains = append(domains, s)
+			}
+		}
+	}
+	return domains, nil
 }
 
 func (p *registerInbucketMailProvider) CreateMailbox(username string) (map[string]any, error) {
@@ -1093,6 +1241,11 @@ func (p *registerYYDSMailProvider) CreateMailbox(username string) (map[string]an
 			return nil, err
 		}
 		payload["domain"] = domain
+	} else {
+		// 用户未配置域名，尝试从 API 获取可用域名随机选一个
+		if domain := fetchOrFallbackDomain(p); domain != "" {
+			payload["domain"] = domain
+		}
 	}
 	if subdomain := util.Clean(p.entry["subdomain"]); subdomain != "" {
 		payload["subdomain"] = subdomain
@@ -1163,6 +1316,25 @@ func (p *registerYYDSMailProvider) FetchLatestMessage(mailbox map[string]any) (m
 		"received_at":  firstNonNil(message["createdAt"], message["created_at"], message["receivedAt"], message["date"], message["timestamp"]),
 		"raw":          raw,
 	}, nil
+}
+
+func (p *registerYYDSMailProvider) FetchAvailableDomains() ([]string, error) {
+	data, err := p.request(http.MethodGet, "/domains", "", nil, nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	items := util.AsMapSlice(data)
+	var domains []string
+	for _, item := range items {
+		if !util.ToBool(item["isVerified"]) || !util.ToBool(item["isPublic"]) {
+			continue
+		}
+		domain := util.Clean(item["domain"])
+		if domain != "" {
+			domains = append(domains, domain)
+		}
+	}
+	return domains, nil
 }
 
 func (p *registerYYDSMailProvider) request(method, path, token string, query map[string]string, payload any, expected ...int) (any, error) {
