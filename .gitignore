@@ -1,6 +1,7 @@
 # Generated files
 build/
 dist/
+internal/web/dist/
 web_dist
 chatgpt2api.exe
 .omx/
@@ -24,6 +25,9 @@ docker-compose-local.yml
 # Environment variables
 .env
 .env.local
+
+# npm lock (project uses bun)
+web/package-lock.json
 
 # Database files
 *.db
