@@ -167,6 +167,10 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 	body["owner_name"] = identityDisplayName(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
 	a.attachCreationTaskLimiter(body, identity)
+	// 外部 API 调用时图片默认公开，方便 Cherry Studio 等客户端直接访问 URL
+	if util.Clean(body["visibility"]) == "" {
+		body["visibility"] = service.ImageVisibilityPublic
+	}
 	visibility, err := service.NormalizeImageVisibility(util.Clean(body["visibility"]))
 	if err != nil {
 		util.WriteError(w, http.StatusBadRequest, err.Error())
@@ -199,6 +203,10 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	body["owner_name"] = identityDisplayName(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
 	a.attachCreationTaskLimiter(body, identity)
+	// 外部 API 调用时图片默认公开
+	if util.Clean(body["visibility"]) == "" {
+		body["visibility"] = service.ImageVisibilityPublic
+	}
 	visibility, err := service.NormalizeImageVisibility(util.Clean(body["visibility"]))
 	if err != nil {
 		util.WriteError(w, http.StatusBadRequest, err.Error())
