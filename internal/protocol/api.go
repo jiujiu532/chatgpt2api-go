@@ -55,7 +55,22 @@ func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any
 	}
 	result, err := e.CollectImageOutputsWithProgress(outputs, errCh, imageOutputProgressCallback(body))
 	if err == nil && result != nil {
-		injectImageUsageFromResult(result, prompt)
+		// 将原始 b64 数据转换为 URL，并注入 usage
+		formatted := e.FormatImageResultWithOptions(
+			util.AsMapSlice(result["data"]),
+			prompt,
+			responseFormat,
+			baseURL,
+			util.Clean(body["owner_id"]),
+			util.Clean(body["owner_name"]),
+			int64(util.ToInt(result["created"], 0)),
+			util.Clean(result["message"]),
+			ImageOutputOptions{},
+		)
+		// 保留原始 result 中的其他字段（如 output_type、message）
+		for k, v := range formatted {
+			result[k] = v
+		}
 	}
 	return result, nil, err
 }
@@ -102,17 +117,34 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 	}
 	result, err := e.CollectImageOutputsWithProgress(outputs, errCh, imageOutputProgressCallback(body))
 	if err == nil && result != nil {
+		// 将原始 b64 数据转换为 URL，并注入 usage（含输入图片 token）
 		inputImageBytes := 0
 		for _, img := range images {
 			inputImageBytes += len(img.Data)
 		}
-		injectImageUsageFromResult(result, util.Clean(body["prompt"]))
-		if usage, ok := result["usage"].(map[string]any); ok && inputImageBytes > 0 {
-			promptTokens := util.ToInt(usage["prompt_tokens"], 0)
-			promptTokens += inputImageBytes / 3
-			completionTokens := util.ToInt(usage["completion_tokens"], 0)
-			usage["prompt_tokens"] = promptTokens
-			usage["total_tokens"] = promptTokens + completionTokens
+		formatted := e.FormatImageResultWithOptions(
+			util.AsMapSlice(result["data"]),
+			util.Clean(body["prompt"]),
+			firstNonEmpty(util.Clean(body["response_format"]), "b64_json"),
+			util.Clean(body["base_url"]),
+			util.Clean(body["owner_id"]),
+			util.Clean(body["owner_name"]),
+			int64(util.ToInt(result["created"], 0)),
+			util.Clean(result["message"]),
+			ImageOutputOptions{},
+		)
+		for k, v := range formatted {
+			result[k] = v
+		}
+		// 将输入图片字节数加入 prompt_tokens
+		if inputImageBytes > 0 {
+			if usage, ok := result["usage"].(map[string]any); ok {
+				promptTokens := util.ToInt(usage["prompt_tokens"], 0)
+				promptTokens += inputImageBytes / 3
+				completionTokens := util.ToInt(usage["completion_tokens"], 0)
+				usage["prompt_tokens"] = promptTokens
+				usage["total_tokens"] = promptTokens + completionTokens
+			}
 		}
 	}
 	return result, nil, err
@@ -137,30 +169,6 @@ func imageOutputSlotAcquirer(body map[string]any) ImageOutputSlotAcquirer {
 		return acquire
 	default:
 		return nil
-	}
-}
-
-// injectImageUsageFromResult 从 result 的 data 中读取 b64_json 计算 completion_tokens
-// 并根据 prompt 计算 prompt_tokens，注入到 result["usage"]
-func injectImageUsageFromResult(result map[string]any, prompt string) {
-	data := util.AsMapSlice(result["data"])
-	totalImageBytes := 0
-	for _, item := range data {
-		b64 := util.Clean(item["b64_json"])
-		if b64 != "" {
-			// base64 字符数 / 4 * 3 ≈ 原始字节数，但直接用 len(b64)/4*3 更快
-			totalImageBytes += len(b64) * 3 / 4
-		}
-	}
-	promptTokens := CountTextTokens(prompt, "gpt-image-2")
-	completionTokens := totalImageBytes / 3
-	if completionTokens == 0 && len(data) > 0 {
-		completionTokens = len(data) * 1056 // 降级估算
-	}
-	result["usage"] = map[string]any{
-		"prompt_tokens":     promptTokens,
-		"completion_tokens": completionTokens,
-		"total_tokens":      promptTokens + completionTokens,
 	}
 }
 
