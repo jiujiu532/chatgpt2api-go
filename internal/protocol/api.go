@@ -54,6 +54,9 @@ func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any
 		return nil, &StreamResult{Items: StreamImageChunks(outputs), Err: errCh, Kind: "openai"}, nil
 	}
 	result, err := e.CollectImageOutputsWithProgress(outputs, errCh, imageOutputProgressCallback(body))
+	if err == nil && result != nil {
+		injectImageUsageFromResult(result, prompt)
+	}
 	return result, nil, err
 }
 
@@ -99,14 +102,14 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 	}
 	result, err := e.CollectImageOutputsWithProgress(outputs, errCh, imageOutputProgressCallback(body))
 	if err == nil && result != nil {
-		// 将输入图片的字节数计入 prompt_tokens
 		inputImageBytes := 0
 		for _, img := range images {
 			inputImageBytes += len(img.Data)
 		}
-		if usage, ok := result["usage"].(map[string]any); ok {
+		injectImageUsageFromResult(result, util.Clean(body["prompt"]))
+		if usage, ok := result["usage"].(map[string]any); ok && inputImageBytes > 0 {
 			promptTokens := util.ToInt(usage["prompt_tokens"], 0)
-			promptTokens += inputImageBytes / 3 // 图片字节数按 base64 token 换算
+			promptTokens += inputImageBytes / 3
 			completionTokens := util.ToInt(usage["completion_tokens"], 0)
 			usage["prompt_tokens"] = promptTokens
 			usage["total_tokens"] = promptTokens + completionTokens
@@ -134,6 +137,30 @@ func imageOutputSlotAcquirer(body map[string]any) ImageOutputSlotAcquirer {
 		return acquire
 	default:
 		return nil
+	}
+}
+
+// injectImageUsageFromResult 从 result 的 data 中读取 b64_json 计算 completion_tokens
+// 并根据 prompt 计算 prompt_tokens，注入到 result["usage"]
+func injectImageUsageFromResult(result map[string]any, prompt string) {
+	data := util.AsMapSlice(result["data"])
+	totalImageBytes := 0
+	for _, item := range data {
+		b64 := util.Clean(item["b64_json"])
+		if b64 != "" {
+			// base64 字符数 / 4 * 3 ≈ 原始字节数，但直接用 len(b64)/4*3 更快
+			totalImageBytes += len(b64) * 3 / 4
+		}
+	}
+	promptTokens := CountTextTokens(prompt, "gpt-image-2")
+	completionTokens := totalImageBytes / 3
+	if completionTokens == 0 && len(data) > 0 {
+		completionTokens = len(data) * 1056 // 降级估算
+	}
+	result["usage"] = map[string]any{
+		"prompt_tokens":     promptTokens,
+		"completion_tokens": completionTokens,
+		"total_tokens":      promptTokens + completionTokens,
 	}
 }
 
