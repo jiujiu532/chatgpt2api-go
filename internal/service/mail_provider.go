@@ -1104,7 +1104,7 @@ func (p *registerMoEmailProvider) CreateMailbox(username string) (map[string]any
 	}
 	payload := map[string]any{
 		"name":       firstNonEmpty(strings.TrimSpace(username), registerRandomMailboxName()),
-		"expiryTime": util.ToInt(p.entry["expiry_time"], 0),
+		"expiryTime": util.ToInt(p.entry["expiry_time"], 3600000),
 		"domain":     domain,
 	}
 	data, err := registerMailRequestJSON(p.client, http.MethodPost, apiBase+"/api/emails/generate", map[string]string{
