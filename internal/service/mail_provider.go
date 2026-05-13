@@ -1102,9 +1102,13 @@ func (p *registerMoEmailProvider) CreateMailbox(username string) (map[string]any
 			return nil, fmt.Errorf("moemail domain is required (configure domain list or ensure API returns available domains)")
 		}
 	}
+	expiryTime := util.ToInt(p.entry["expiry_time"], 3600000)
+	if expiryTime <= 0 {
+		expiryTime = 3600000 // 默认 1 小时，0 在 moemail 表示永久，不应作为默认值
+	}
 	payload := map[string]any{
 		"name":       firstNonEmpty(strings.TrimSpace(username), registerRandomMailboxName()),
-		"expiryTime": util.ToInt(p.entry["expiry_time"], 3600000),
+		"expiryTime": expiryTime,
 		"domain":     domain,
 	}
 	data, err := registerMailRequestJSON(p.client, http.MethodPost, apiBase+"/api/emails/generate", map[string]string{

@@ -51,7 +51,7 @@ export function RegisterCard() {
       ...(type === "tempmail_lol" ? { api_key: "", domain: [] } : {}),
       ...(type === "duckmail" ? { api_key: "", default_domain: "duckmail.sbs" } : {}),
       ...(type === "gptmail" ? { api_key: "", default_domain: "" } : {}),
-      ...(type === "moemail" ? { api_base: "", api_key: "", domain: [], expiry_time: 0 } : {}),
+      ...(type === "moemail" ? { api_base: "", api_key: "", domain: [], expiry_time: 3600000 } : {}),
       ...(type === "inbucket" ? { api_base: "", domain: [], random_subdomain: true } : {}),
       ...(type === "yyds_mail" ? { api_base: "https://maliapi.215.im/v1", api_key: "", domain: [], subdomain: "", wildcard: false } : {}),
       ...(type === "mail_tm" ? { api_base: "", domain: [] } : {}),
