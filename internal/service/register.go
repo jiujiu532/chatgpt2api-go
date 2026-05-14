@@ -1142,6 +1142,14 @@ func normalizeRegisterMailConfig(raw map[string]any) map[string]any {
 		if item["domain"] != nil {
 			item["domain"] = util.AsStringSlice(item["domain"])
 		}
+		// moemail: 强制 expiry_time 不为 0（0 表示永久，不应作为默认值）
+		if util.Clean(item["type"]) == "moemail" {
+			et := util.ToInt(item["expiry_time"], 3600000)
+			if et <= 0 {
+				et = 3600000
+			}
+			item["expiry_time"] = et
+		}
 		out = append(out, item)
 	}
 	cfg["providers"] = out
