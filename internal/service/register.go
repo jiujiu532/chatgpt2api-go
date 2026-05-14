@@ -426,6 +426,11 @@ func registerFailedToCreateAccount(payload map[string]any) bool {
 	return util.Clean(payload["message"]) == "Failed to create account. Please try again."
 }
 
+func registerUnsupportedEmail(payload map[string]any) bool {
+	errPayload := util.StringMap(payload["error"])
+	return util.Clean(errPayload["code"]) == "unsupported_email"
+}
+
 func (w *registerWorker) platformAuthorize(ctx context.Context, email string) error {
 	w.step("开始 platform authorize")
 	values := registerAuthorizeParams(email, w.deviceID, registerRandomToken(), registerRandomToken(), registerPKCEChallenge())
@@ -458,6 +463,17 @@ func (w *registerWorker) registerUser(ctx context.Context, email, password strin
 	if status != http.StatusOK {
 		if registerFailedToCreateAccount(payload) {
 			w.step("注册失败提示: 邮箱域名很可能因滥用被封禁，请更换邮箱域名")
+		}
+		if registerUnsupportedEmail(payload) {
+			domain := ""
+			if idx := strings.LastIndex(email, "@"); idx >= 0 {
+				domain = email[idx+1:]
+			}
+			if domain != "" {
+				w.step("注册失败提示: 域名 " + domain + " 不被 OpenAI 支持，请在邮箱配置中删除该域名")
+			} else {
+				w.step("注册失败提示: 邮箱域名不被 OpenAI 支持，请在邮箱配置中删除该域名")
+			}
 		}
 		return fmt.Errorf("user_register_http_%d%s", status, registerResponseDetail(payload))
 	}
