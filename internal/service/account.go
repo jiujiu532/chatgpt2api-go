@@ -374,25 +374,15 @@ func (s *AccountService) GetAvailableAccessToken(ctx context.Context) (string, e
 
 func (s *AccountService) GetAvailableAccessTokenFor(ctx context.Context, allow func(map[string]any) bool) (string, error) {
 	attempted := map[string]struct{}{}
-	var lastRefreshErr error
 	for {
 		reservation, err := s.reserveNextCandidateToken(attempted, allow)
 		if err != nil {
-			if lastRefreshErr != nil {
-				return "", lastRefreshErr
-			}
 			return "", err
 		}
 		attempted[reservation.token] = struct{}{}
-		account, refreshErr := s.RefreshAccountState(ctx, reservation.token)
-		if refreshErr != nil {
-			lastRefreshErr = refreshErr
-			if cached := s.cachedAccountForTransientRefreshError(reservation.token, refreshErr); cached != nil &&
-				(allow == nil || allow(cached)) &&
-				s.reservedImageSlotAvailable(reservation) {
-				return reservation.token, nil
-			}
-		}
+		// 直接用本地缓存状态选账号，不做实时刷新
+		// 实时刷新会在每次选账号时发起 3 个 HTTP 请求，代理不稳定时极易失败导致账号被跳过
+		account := s.GetAccount(reservation.token)
 		if account != nil && (allow == nil || allow(account)) && s.reservedImageSlotAvailable(reservation) {
 			return reservation.token, nil
 		}
@@ -890,7 +880,8 @@ func imageAccountCapacity(account map[string]any) int {
 		return 0
 	}
 	if util.ToBool(account["image_quota_unknown"]) {
-		return 1
+		// Free 账号配额未知，允许同时处理 3 个请求以提高吞吐量
+		return 3
 	}
 	return util.ToInt(account["quota"], 0)
 }

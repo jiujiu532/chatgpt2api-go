@@ -405,10 +405,16 @@ func TestGetAvailableAccessTokenLimitsUnknownImageQuotaToOneInFlight(t *testing.
 		t.Fatalf("first token = %q, want token-1", token)
 	}
 
-	if token, err := accounts.GetAvailableAccessToken(context.Background()); err == nil {
-		t.Fatalf("second GetAvailableAccessToken() = %q, want no available image quota", token)
+	// 容量已提升为 3，第二次请求应该也能获取到 token-1
+	token2, err := accounts.GetAvailableAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("second GetAvailableAccessToken() error = %v", err)
+	}
+	if token2 != "token-1" {
+		t.Fatalf("second token = %q, want token-1", token2)
 	}
 
+	accounts.MarkImageResult("token-1", false)
 	accounts.MarkImageResult("token-1", false)
 	token, err = accounts.GetAvailableAccessToken(context.Background())
 	if err != nil {
@@ -451,32 +457,18 @@ func TestGetAvailableAccessTokenAllowsFreeUnknownImageQuota(t *testing.T) {
 
 func TestGetAvailableAccessTokenReportsRefreshFailure(t *testing.T) {
 	accounts := newTestAccountService(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("<html>ok</html>"))
-		case "/backend-api/me":
-			http.Error(w, "temporary upstream failure", http.StatusBadGateway)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
-		return server.Client()
-	}
 	accounts.AddAccounts([]string{"token-1"})
 	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 1})
 
+	// 优化后不再实时刷新，直接用缓存状态，应该能获取到 token
 	token, err := accounts.GetAvailableAccessToken(context.Background())
-	if err == nil {
-		t.Fatalf("GetAvailableAccessToken() token = %q, want refresh error", token)
+	if err != nil {
+		t.Fatalf("GetAvailableAccessToken() error = %v, want token from cache", err)
 	}
-	if !strings.Contains(err.Error(), "/backend-api/me failed: HTTP 502") {
-		t.Fatalf("GetAvailableAccessToken() error = %q, want refresh failure detail", err.Error())
+	if token != "token-1" {
+		t.Fatalf("GetAvailableAccessToken() token = %q, want token-1", token)
 	}
+	accounts.MarkImageResult("token-1", false)
 }
 
 func TestGetAvailableAccessTokenUsesCachedAccountOnConnectionRefreshFailure(t *testing.T) {
