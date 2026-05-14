@@ -119,8 +119,8 @@ func (sch *RegisterScheduler) tick() {
 
 func (sch *RegisterScheduler) preemptManualTask() {
 	sch.mu.Lock()
-	defer sch.mu.Unlock()
 	if sch.manualPaused {
+		sch.mu.Unlock()
 		return
 	}
 	sch.service.mu.Lock()
@@ -132,11 +132,11 @@ func (sch *RegisterScheduler) preemptManualTask() {
 		sch.service.notifyLocked()
 	}
 	sch.service.mu.Unlock()
-
 	sch.manualWasAlive = wasRunning
 	sch.manualPaused = true
+	sch.mu.Unlock()
 
-	// 更新 stats 中的暂停状态
+	// 在锁外调用 bumpStats，避免锁顺序死锁
 	sch.service.bumpStats(map[string]any{
 		"manual_paused":        true,
 		"manual_paused_reason": "scheduled_preemption",
@@ -167,9 +167,11 @@ func (sch *RegisterScheduler) startScheduledTask(threads int) {
 	// 启动定时注册任务
 	sch.service.mu.Lock()
 	sch.service.config["enabled"] = true
-	originalThreads := sch.service.config["threads"]
+	// 只在没有保存过原始线程数时才保存，防止重复触发时覆盖
+	if sch.service.config["_scheduled_original_threads"] == nil {
+		sch.service.config["_scheduled_original_threads"] = sch.service.config["threads"]
+	}
 	sch.service.config["threads"] = threads
-	sch.service.config["_scheduled_original_threads"] = originalThreads
 	sch.service.config["_scheduled_running"] = true
 	sch.service.appendLogLocked(fmt.Sprintf("定时注册任务启动，线程数=%d", threads), "green")
 	sch.service.startLocked(false)
@@ -208,15 +210,16 @@ func (sch *RegisterScheduler) stopScheduledTask() {
 
 func (sch *RegisterScheduler) resumeManualTask() {
 	sch.mu.Lock()
-	defer sch.mu.Unlock()
 	if !sch.manualPaused {
+		sch.mu.Unlock()
 		return
 	}
 	wasAlive := sch.manualWasAlive
 	sch.manualPaused = false
 	sch.manualWasAlive = false
+	sch.mu.Unlock()
 
-	// 等待定时任务 runner 结束
+	// 等待定时任务 runner 结束（在锁外等待）
 	deadline := time.Now().Add(60 * time.Second)
 	for {
 		sch.service.mu.Lock()
@@ -235,6 +238,7 @@ func (sch *RegisterScheduler) resumeManualTask() {
 		sch.service.mu.Unlock()
 	}
 
+	// 在锁外调用 bumpStats
 	sch.service.bumpStats(map[string]any{
 		"manual_paused":        false,
 		"manual_paused_reason": "",

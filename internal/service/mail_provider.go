@@ -140,6 +140,7 @@ func waitRegisterCode(ctx context.Context, mailConfig map[string]any, mailbox ma
 	conf := registerMailSettingsFromConfig(mailConfig)
 	deadline := time.NewTimer(conf.WaitTimeout)
 	defer deadline.Stop()
+	attempt := 0
 	for {
 		message, fetchErr := provider.FetchLatestMessage(mailbox)
 		if fetchErr == nil && message != nil {
@@ -147,7 +148,15 @@ func waitRegisterCode(ctx context.Context, mailConfig map[string]any, mailbox ma
 				return code, nil
 			}
 		}
-		interval := time.NewTimer(conf.WaitInterval)
+		// 指数退避：前3次每1秒，之后逐渐增加到 wait_interval
+		var waitDur time.Duration
+		if attempt < 3 {
+			waitDur = 1 * time.Second
+		} else {
+			waitDur = conf.WaitInterval
+		}
+		attempt++
+		interval := time.NewTimer(waitDur)
 		select {
 		case <-ctx.Done():
 			interval.Stop()

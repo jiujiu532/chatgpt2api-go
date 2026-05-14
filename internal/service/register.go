@@ -45,8 +45,24 @@ const (
 )
 
 var (
-	registerFirstNames = []string{"James", "Robert", "John", "Michael", "David", "Mary", "Emma", "Olivia"}
-	registerLastNames  = []string{"Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller"}
+	registerFirstNames = []string{
+		"James", "Robert", "John", "Michael", "David", "William", "Richard", "Joseph",
+		"Thomas", "Charles", "Christopher", "Daniel", "Matthew", "Anthony", "Mark",
+		"Mary", "Patricia", "Jennifer", "Linda", "Barbara", "Elizabeth", "Susan",
+		"Jessica", "Sarah", "Karen", "Lisa", "Nancy", "Betty", "Margaret", "Sandra",
+		"Emma", "Olivia", "Ava", "Isabella", "Sophia", "Mia", "Charlotte", "Amelia",
+		"Harper", "Evelyn", "Noah", "Liam", "Ethan", "Mason", "Logan", "Lucas",
+		"Jackson", "Aiden", "Elijah", "Oliver",
+	}
+	registerLastNames = []string{
+		"Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis",
+		"Wilson", "Anderson", "Taylor", "Thomas", "Jackson", "White", "Harris",
+		"Martin", "Thompson", "Young", "Allen", "King", "Wright", "Scott", "Green",
+		"Baker", "Adams", "Nelson", "Carter", "Mitchell", "Perez", "Roberts",
+		"Turner", "Phillips", "Campbell", "Parker", "Evans", "Edwards", "Collins",
+		"Stewart", "Morris", "Rogers", "Reed", "Cook", "Morgan", "Bell", "Murphy",
+		"Bailey", "Rivera", "Cooper", "Richardson", "Cox",
+	}
 )
 
 type RegisterService struct {
@@ -209,6 +225,7 @@ func (s *RegisterService) run() {
 	submitted, running, done, success, fail := 0, 0, 0, 0, 0
 	results := make(chan registerWorkerResult, threads)
 	for {
+		// 只在需要时读取配置（减少锁竞争）
 		current := s.Get()
 		for util.ToBool(current["enabled"]) && !s.targetReached(current, submitted) && running < threads {
 			submitted++
@@ -218,7 +235,10 @@ func (s *RegisterService) run() {
 			go func(index int, config map[string]any) {
 				results <- s.runWorker(index, config)
 			}(submitted, workerCfg)
-			current = s.Get()
+			// 只在还需要填充 worker 时才重新读取配置
+			if running < threads {
+				current = s.Get()
+			}
 		}
 		s.bumpStats(map[string]any{"running": running, "done": done, "success": success, "fail": fail})
 		if running == 0 {
@@ -1254,7 +1274,7 @@ func (s *RegisterService) bumpStats(updates map[string]any) {
 	}
 	stats["updated_at"] = util.NowISO()
 	s.config["stats"] = stats
-	s.saveLocked()
+	// 只推送 SSE，不写磁盘（磁盘写入由 run() 结束时或 Stop/Reset 触发）
 	s.notifyLocked()
 }
 
@@ -1302,9 +1322,18 @@ func registerRandomName() (string, string) {
 }
 
 func registerRandomBirthdate() string {
-	year := 1996 + mathrand.Intn(11)
+	// 扩大年龄范围：1985-2003（22-40岁），更自然的分布
+	year := 1985 + mathrand.Intn(19)
 	month := 1 + mathrand.Intn(12)
-	day := 1 + mathrand.Intn(28)
+	// 根据月份确定最大天数，避免无效日期
+	maxDay := 28
+	switch month {
+	case 1, 3, 5, 7, 8, 10, 12:
+		maxDay = 31
+	case 4, 6, 9, 11:
+		maxDay = 30
+	}
+	day := 1 + mathrand.Intn(maxDay)
 	return fmt.Sprintf("%04d-%02d-%02d", year, month, day)
 }
 
