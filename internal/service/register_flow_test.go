@@ -187,7 +187,7 @@ func TestLoginAndExchangeTokensSubmitsEmailBeforePassword(t *testing.T) {
 		})},
 	}
 
-	tokens, err := worker.loginAndExchangeTokens(context.Background(), "user@example.test", "Password123!", map[string]any{"address": "user@example.test"})
+	tokens, err := worker.loginAndExchangeTokens(context.Background(), "user@example.test", "Password123!", map[string]any{"address": "user@example.test"}, "", "")
 	if err != nil {
 		t.Fatalf("loginAndExchangeTokens() error = %v", err)
 	}

@@ -45,6 +45,7 @@ const (
 )
 
 var (
+	// 静态名字池（50×50=2500种），与动态生成混合使用
 	registerFirstNames = []string{
 		"James", "Robert", "John", "Michael", "David", "William", "Richard", "Joseph",
 		"Thomas", "Charles", "Christopher", "Daniel", "Matthew", "Anthony", "Mark",
@@ -62,6 +63,38 @@ var (
 		"Turner", "Phillips", "Campbell", "Parker", "Evans", "Edwards", "Collins",
 		"Stewart", "Morris", "Rogers", "Reed", "Cook", "Morgan", "Bell", "Murphy",
 		"Bailey", "Rivera", "Cooper", "Richardson", "Cox",
+	}
+
+	// 动态生成英文名的音节组件
+	registerNamePrefixes = []string{
+		"Al", "An", "Br", "Ca", "Ch", "Cl", "Co", "Da", "De", "Di",
+		"Do", "Ed", "El", "Em", "Er", "Ev", "Fr", "Ga", "Ge", "Gr",
+		"Ha", "He", "Ho", "Hu", "Ja", "Je", "Jo", "Ju", "Ka", "Ke",
+		"Ki", "La", "Le", "Li", "Lo", "Lu", "Ma", "Me", "Mi", "Mo",
+		"Na", "Ne", "Ni", "No", "Ol", "Or", "Pa", "Pe", "Ra", "Re",
+		"Ri", "Ro", "Ru", "Sa", "Se", "Sh", "Si", "So", "Ta", "Te",
+		"Ti", "To", "Va", "Ve", "Vi", "Wa", "We", "Wi",
+	}
+	registerNameSuffixes = []string{
+		"an", "en", "in", "on", "ley", "ney", "ton", "son", "den", "ren",
+		"lia", "mia", "nia", "ria", "ard", "bert", "ford", "land", "mond",
+		"lyn", "wyn", "ice", "ine", "ace", "ane", "dy", "fy", "ly", "ry", "ty",
+	}
+	registerLastNamePrefixes = []string{
+		"Ad", "Al", "An", "Ba", "Be", "Bl", "Bo", "Br", "Bu", "Ca",
+		"Ch", "Cl", "Co", "Cr", "Da", "De", "Di", "Do", "Ed", "El",
+		"Ev", "Fa", "Fi", "Fl", "Fo", "Fr", "Ga", "Ge", "Gi", "Go",
+		"Gr", "Ha", "He", "Hi", "Ho", "Hu", "Ja", "Je", "Jo", "Ka",
+		"Ke", "Ki", "La", "Le", "Li", "Lo", "Lu", "Ma", "Me", "Mi",
+		"Mo", "Na", "Ne", "Ni", "No", "Pa", "Pe", "Ra", "Re", "Ri",
+		"Ro", "Ru", "Sa", "Sc", "Se", "Sh", "Si", "Sm", "So", "St",
+		"Ta", "Te", "Th", "Ti", "To", "Tr", "Va", "Ve", "Vi", "Wa",
+		"We", "Wi", "Wo",
+	}
+	registerLastNameSuffixes = []string{
+		"son", "ton", "man", "den", "ren", "ley", "ney", "ford", "land", "ward",
+		"berg", "field", "wood", "brook", "dale", "ard", "bert", "hart", "wick",
+		"kins", "ins", "ens", "er", "or", "ar", "ell", "all", "ock", "ack",
 	}
 )
 
@@ -368,6 +401,42 @@ func (w *registerWorker) run(ctx context.Context) (map[string]any, error) {
 	if err := w.sendOTP(ctx); err != nil {
 		return nil, err
 	}
+
+	// 在等待验证码期间，并行预生成后续步骤需要的 sentinel token
+	// 这样登录阶段可以直接使用，减少 authorizeLogin session 的等待时间，降低 409 概率
+	type prewarmResult struct {
+		validateToken  string
+		createToken    string
+		loginToken     string
+		passwordToken  string
+		err            error
+	}
+	prewarmCh := make(chan prewarmResult, 1)
+	go func() {
+		var r prewarmResult
+		// 预生成 validateOTP 的 sentinel token
+		r.validateToken, r.err = w.buildSentinelToken(ctx, "authorize_continue")
+		if r.err != nil {
+			prewarmCh <- r
+			return
+		}
+		// 预生成 createAccount 的 sentinel token
+		r.createToken, r.err = w.buildSentinelToken(ctx, "oauth_create_account")
+		if r.err != nil {
+			prewarmCh <- r
+			return
+		}
+		// 预生成登录阶段的 sentinel token
+		r.loginToken, r.err = w.buildSentinelToken(ctx, "authorize_continue")
+		if r.err != nil {
+			prewarmCh <- r
+			return
+		}
+		// 预生成 password_verify 的 sentinel token
+		r.passwordToken, r.err = w.buildSentinelToken(ctx, "password_verify")
+		prewarmCh <- r
+	}()
+
 	w.step("开始等待注册验证码")
 	code, err := waitRegisterCode(ctx, w.mail, mailbox)
 	if err != nil {
@@ -377,13 +446,20 @@ func (w *registerWorker) run(ctx context.Context) (map[string]any, error) {
 		return nil, fmt.Errorf("waiting for register verification code timed out")
 	}
 	w.step("收到注册验证码: " + code)
-	if err := w.validateOTP(ctx, code); err != nil {
+
+	// 获取预热结果（如果还没完成则等待，如果失败则降级为实时生成）
+	prewarm := <-prewarmCh
+	if prewarm.err != nil {
+		prewarm = prewarmResult{} // 降级：后续步骤实时生成
+	}
+
+	if err := w.validateOTPWithToken(ctx, code, prewarm.validateToken); err != nil {
 		return nil, err
 	}
-	if err := w.createAccount(ctx, firstName+" "+lastName, registerRandomBirthdate()); err != nil {
+	if err := w.createAccountWithToken(ctx, firstName+" "+lastName, registerRandomBirthdate(), prewarm.createToken); err != nil {
 		return nil, err
 	}
-	tokens, err := w.loginAndExchangeTokens(ctx, email, password, mailbox)
+	tokens, err := w.loginAndExchangeTokens(ctx, email, password, mailbox, prewarm.loginToken, prewarm.passwordToken)
 	if err != nil {
 		return nil, err
 	}
@@ -503,12 +579,31 @@ func (w *registerWorker) validateOTP(ctx context.Context, code string) error {
 	return nil
 }
 
+func (w *registerWorker) validateOTPWithToken(ctx context.Context, code, preToken string) error {
+	w.step("开始校验验证码 " + code)
+	if _, err := w.validateOTPCodeWithToken(ctx, code, preToken); err != nil {
+		return err
+	}
+	w.step("验证码校验完成")
+	return nil
+}
+
 func (w *registerWorker) createAccount(ctx context.Context, name, birthdate string) error {
+	return w.createAccountWithToken(ctx, name, birthdate, "")
+}
+
+func (w *registerWorker) createAccountWithToken(ctx context.Context, name, birthdate, preToken string) error {
 	w.step("开始创建账号资料")
 	headers := w.jsonHeaders(registerAuthBase + "/about-you")
-	token, err := w.buildSentinelToken(ctx, "oauth_create_account")
-	if err != nil {
-		return err
+	var token string
+	var err error
+	if preToken != "" {
+		token = preToken
+	} else {
+		token, err = w.buildSentinelToken(ctx, "oauth_create_account")
+		if err != nil {
+			return err
+		}
 	}
 	headers["openai-sentinel-token"] = token
 	status, payload, err := w.request(ctx, http.MethodPost, registerAuthBase+"/api/accounts/create_account", map[string]any{
@@ -528,7 +623,7 @@ func (w *registerWorker) createAccount(ctx context.Context, name, birthdate stri
 	return nil
 }
 
-func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, password string, mailbox map[string]any) (map[string]any, error) {
+func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, password string, mailbox map[string]any, preLoginToken, prePasswordToken string) (map[string]any, error) {
 	w.step("开始独立登录换 token")
 	codeVerifier, codeChallenge := generateRegisterPKCE()
 	values := registerAuthorizeParams(email, w.deviceID, registerRandomToken(), registerRandomToken(), codeChallenge)
@@ -544,10 +639,16 @@ func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, pass
 	}
 
 	// 提前生成 sentinel token（请求 sentinel.openai.com，与 auth.openai.com 无关）
-	// 这样 authorizeLogin 建立 session 后可以立刻提交邮箱，减少 session 过期导致的 409
-	sentinelToken, err := w.buildSentinelToken(ctx, "authorize_continue")
-	if err != nil {
-		return nil, err
+	// 优先使用预热 token，否则实时生成
+	var sentinelToken string
+	var err error
+	if preLoginToken != "" {
+		sentinelToken = preLoginToken
+	} else {
+		sentinelToken, err = w.buildSentinelToken(ctx, "authorize_continue")
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if err := authorizeLogin(); err != nil {
@@ -575,11 +676,16 @@ func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, pass
 	w.step("邮箱提交完成")
 
 	headers := w.jsonHeaders(registerAuthBase + "/log-in/password")
-	token, err := w.buildSentinelToken(ctx, "password_verify")
-	if err != nil {
-		return nil, err
+	var pwToken string
+	if prePasswordToken != "" {
+		pwToken = prePasswordToken
+	} else {
+		pwToken, err = w.buildSentinelToken(ctx, "password_verify")
+		if err != nil {
+			return nil, err
+		}
 	}
-	headers["openai-sentinel-token"] = token
+	headers["openai-sentinel-token"] = pwToken
 	status, payload, err = w.request(ctx, http.MethodPost, registerAuthBase+"/api/accounts/password/verify", map[string]any{
 		"password": password,
 	}, headers, false)
@@ -718,6 +824,10 @@ func (w *registerWorker) followConsentForCode(ctx context.Context, continueURL s
 }
 
 func (w *registerWorker) validateOTPCode(ctx context.Context, code string) (map[string]any, error) {
+	return w.validateOTPCodeWithToken(ctx, code, "")
+}
+
+func (w *registerWorker) validateOTPCodeWithToken(ctx context.Context, code, preToken string) (map[string]any, error) {
 	status, payload, err := w.request(ctx, http.MethodPost, registerAuthBase+"/api/accounts/email-otp/validate", map[string]any{"code": code}, w.jsonHeaders(registerAuthBase+"/email-verification"), true)
 	if err != nil {
 		return nil, err
@@ -726,9 +836,15 @@ func (w *registerWorker) validateOTPCode(ctx context.Context, code string) (map[
 		return payload, nil
 	}
 	headers := w.jsonHeaders(registerAuthBase + "/email-verification")
-	token, tokenErr := w.buildSentinelToken(ctx, "authorize_continue")
-	if tokenErr != nil {
-		return nil, fmt.Errorf("validate_otp_http_%d; sentinel fallback failed: %w", status, tokenErr)
+	var token string
+	if preToken != "" {
+		token = preToken
+	} else {
+		var tokenErr error
+		token, tokenErr = w.buildSentinelToken(ctx, "authorize_continue")
+		if tokenErr != nil {
+			return nil, fmt.Errorf("validate_otp_http_%d; sentinel fallback failed: %w", status, tokenErr)
+		}
 	}
 	headers["openai-sentinel-token"] = token
 	status, payload, err = w.request(ctx, http.MethodPost, registerAuthBase+"/api/accounts/email-otp/validate", map[string]any{"code": code}, headers, true)
@@ -1363,7 +1479,17 @@ func registerRandomPassword(length int) string {
 }
 
 func registerRandomName() (string, string) {
-	return registerFirstNames[mathrand.Intn(len(registerFirstNames))], registerLastNames[mathrand.Intn(len(registerLastNames))]
+	// 50% 概率用静态名字池，50% 概率动态生成，兼顾真实性和多样性
+	if mathrand.Intn(2) == 0 {
+		return registerFirstNames[mathrand.Intn(len(registerFirstNames))],
+			registerLastNames[mathrand.Intn(len(registerLastNames))]
+	}
+	// 动态生成：前缀 + 后缀，首字母大写
+	firstName := registerNamePrefixes[mathrand.Intn(len(registerNamePrefixes))] +
+		registerNameSuffixes[mathrand.Intn(len(registerNameSuffixes))]
+	lastName := registerLastNamePrefixes[mathrand.Intn(len(registerLastNamePrefixes))] +
+		registerLastNameSuffixes[mathrand.Intn(len(registerLastNameSuffixes))]
+	return firstName, lastName
 }
 
 func registerRandomBirthdate() string {
