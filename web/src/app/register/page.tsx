@@ -16,6 +16,7 @@ function RegisterDataController() {
   const didLoadRef = useRef(false);
   const loadRegister = useSettingsStore((state) => state.loadRegister);
   const setRegisterConfig = useSettingsStore((state) => state.setRegisterConfig);
+  const updateRegisterStatsAndLogs = useSettingsStore((state) => state.updateRegisterStatsAndLogs);
 
   useEffect(() => {
     if (didLoadRef.current) return;
@@ -31,14 +32,16 @@ function RegisterDataController() {
       const baseUrl = webConfig.apiUrl.replace(/\/$/, "");
       source = new EventSource(`${baseUrl}/api/register/events?token=${encodeURIComponent(token)}`);
       source.onmessage = (event) => {
-        setRegisterConfig(JSON.parse(event.data) as RegisterConfig);
+        const data = JSON.parse(event.data) as RegisterConfig;
+        // SSE 只更新运行时状态（stats、logs、enabled），不覆盖用户正在编辑的配置字段
+        updateRegisterStatsAndLogs(data);
       };
     });
     return () => {
       closed = true;
       source?.close();
     };
-  }, [setRegisterConfig]);
+  }, [setRegisterConfig, updateRegisterStatsAndLogs]);
 
   return null;
 }

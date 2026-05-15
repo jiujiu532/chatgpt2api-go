@@ -162,6 +162,7 @@ type SettingsStore = {
 
   loadRegister: (silent?: boolean) => Promise<void>;
   setRegisterConfig: (config: RegisterConfig) => void;
+  updateRegisterStatsAndLogs: (data: RegisterConfig) => void;
   setRegisterProxy: (value: string) => void;
   setRegisterTotal: (value: string) => void;
   setRegisterThreads: (value: string) => void;
@@ -536,6 +537,22 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setRegisterConfig: (config) => {
     set({ registerConfig: config, isLoadingRegister: false });
+  },
+
+  // SSE 专用：只更新运行时状态，不覆盖用户正在编辑的配置字段
+  updateRegisterStatsAndLogs: (data) => {
+    set((state) => {
+      if (!state.registerConfig) return { registerConfig: data, isLoadingRegister: false };
+      return {
+        registerConfig: {
+          ...state.registerConfig,
+          // 只更新这些运行时字段
+          enabled: data.enabled,
+          stats: data.stats,
+          logs: data.logs,
+        },
+      };
+    });
   },
 
   setRegisterProxy: (value) => {

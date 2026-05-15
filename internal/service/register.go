@@ -542,12 +542,20 @@ func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, pass
 		}
 		return nil
 	}
+
+	// 提前生成 sentinel token（请求 sentinel.openai.com，与 auth.openai.com 无关）
+	// 这样 authorizeLogin 建立 session 后可以立刻提交邮箱，减少 session 过期导致的 409
+	sentinelToken, err := w.buildSentinelToken(ctx, "authorize_continue")
+	if err != nil {
+		return nil, err
+	}
+
 	if err := authorizeLogin(); err != nil {
 		return nil, err
 	}
 	w.step("登录 authorize 完成")
 
-	status, payload, err := w.submitLoginEmail(ctx, email)
+	status, payload, err := w.submitLoginEmailWithToken(ctx, email, sentinelToken)
 	if err != nil {
 		return nil, err
 	}
@@ -640,13 +648,17 @@ func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, pass
 }
 
 func (w *registerWorker) submitLoginEmail(ctx context.Context, email string) (int, map[string]any, error) {
-	w.step("开始提交邮箱")
-	headers := w.jsonHeaders(registerAuthBase + "/log-in?usernameKind=email")
 	token, err := w.buildSentinelToken(ctx, "authorize_continue")
 	if err != nil {
 		return 0, nil, err
 	}
-	headers["openai-sentinel-token"] = token
+	return w.submitLoginEmailWithToken(ctx, email, token)
+}
+
+func (w *registerWorker) submitLoginEmailWithToken(ctx context.Context, email, sentinelToken string) (int, map[string]any, error) {
+	w.step("开始提交邮箱")
+	headers := w.jsonHeaders(registerAuthBase + "/log-in?usernameKind=email")
+	headers["openai-sentinel-token"] = sentinelToken
 	status, payload, reqErr := w.request(ctx, http.MethodPost, registerAuthBase+"/api/accounts/authorize/continue", map[string]any{
 		"username": map[string]any{
 			"kind":  "email",
