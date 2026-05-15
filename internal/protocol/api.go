@@ -53,35 +53,59 @@ func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any
 	if util.ToBool(body["stream"]) {
 		return nil, &StreamResult{Items: StreamImageChunks(outputs), Err: errCh, Kind: "openai"}, nil
 	}
+	// 外部 API 路径：format 处理 b64→URL，注入 usage
 	result, err := e.CollectImageOutputsWithProgress(outputs, errCh, imageOutputProgressCallback(body))
 	if err == nil && result != nil {
-		if util.ToBool(body["_internal_task"]) {
-			// 创作台内部任务：保留原始 data（已由 streaming 阶段处理好 URL），不重复 format
-			// 只注入 usage 供统计
-			injectImageUsageFromData(result, prompt)
-		} else {
-			// 外部 API 调用（NewAPI 等）：需要 format 处理 b64→URL，并注入 usage
-			originalData := util.AsMapSlice(result["data"])
-			formatted := e.FormatImageResultWithOptions(
-				originalData,
-				prompt,
-				responseFormat,
-				baseURL,
-				util.Clean(body["owner_id"]),
-				util.Clean(body["owner_name"]),
-				int64(util.ToInt(result["created"], 0)),
-				util.Clean(result["message"]),
-				ImageOutputOptions{},
-			)
-			for k, v := range formatted {
-				result[k] = v
-			}
-			if len(util.AsMapSlice(result["data"])) == 0 && len(originalData) > 0 {
-				result["data"] = originalData
-			}
-			injectImageUsageFromData(result, prompt)
+		formatted := e.FormatImageResultWithOptions(
+			util.AsMapSlice(result["data"]),
+			prompt,
+			responseFormat,
+			baseURL,
+			util.Clean(body["owner_id"]),
+			util.Clean(body["owner_name"]),
+			int64(util.ToInt(result["created"], 0)),
+			util.Clean(result["message"]),
+			ImageOutputOptions{},
+		)
+		for k, v := range formatted {
+			result[k] = v
 		}
 	}
+	return result, nil, err
+}
+
+// HandleImageGenerationsInternal 供创作台内部使用，不重复 format（streaming 阶段已处理好 URL）
+func (e *Engine) HandleImageGenerationsInternal(ctx context.Context, body map[string]any) (map[string]any, *StreamResult, error) {
+	prompt := util.Clean(body["prompt"])
+	if prompt == "" {
+		return nil, nil, HTTPError{Status: 400, Message: "prompt is required"}
+	}
+	model := firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto)
+	n, err := ParseImageCount(body["n"])
+	if err != nil {
+		return nil, nil, err
+	}
+	size := util.Clean(body["size"])
+	quality := util.Clean(body["quality"])
+	outputFormat := NormalizeImageOutputFormat(util.Clean(body["output_format"]))
+	outputCompression, hasOutputCompression := normalizedImageOutputCompression(body["output_compression"])
+	responseFormat := firstNonEmpty(util.Clean(body["response_format"]), "b64_json")
+	baseURL := util.Clean(body["base_url"])
+	request := ConversationRequest{Prompt: prompt, Model: model, Messages: NormalizeMessages(util.AsMapSlice(body["messages"]), nil), N: n, Size: size, Quality: quality, Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), OutputFormat: outputFormat, ResponseFormat: responseFormat, BaseURL: baseURL, OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), MessageAsError: true, AcquireImageOutputSlot: imageOutputSlotAcquirer(body)}
+	if partialImages, ok := normalizedPositiveInt(body["partial_images"]); ok {
+		request.PartialImages = &partialImages
+	}
+	if hasOutputCompression && SupportsImageOutputCompression(outputFormat) {
+		request.OutputCompression = &outputCompression
+	}
+	applyImageToolOptionsToRequest(&request, ImageToolOptionsFromPayload(body))
+	request = request.Normalized()
+	outputs, errCh := e.StreamImageOutputsWithPool(ctx, request)
+	if util.ToBool(body["stream"]) {
+		return nil, &StreamResult{Items: StreamImageChunks(outputs), Err: errCh, Kind: "openai"}, nil
+	}
+	// 创作台路径：直接返回，streaming 阶段已处理好 URL
+	result, err := e.CollectImageOutputsWithProgress(outputs, errCh, imageOutputProgressCallback(body))
 	return result, nil, err
 }
 
@@ -125,38 +149,28 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 	if util.ToBool(body["stream"]) {
 		return nil, &StreamResult{Items: StreamImageChunks(outputs), Err: errCh, Kind: "openai"}, nil
 	}
+	// 外部 API 路径：format 处理 b64→URL，注入 usage（含输入图片 token）
 	result, err := e.CollectImageOutputsWithProgress(outputs, errCh, imageOutputProgressCallback(body))
 	if err == nil && result != nil {
+		formatted := e.FormatImageResultWithOptions(
+			util.AsMapSlice(result["data"]),
+			util.Clean(body["prompt"]),
+			firstNonEmpty(util.Clean(body["response_format"]), "b64_json"),
+			util.Clean(body["base_url"]),
+			util.Clean(body["owner_id"]),
+			util.Clean(body["owner_name"]),
+			int64(util.ToInt(result["created"], 0)),
+			util.Clean(result["message"]),
+			ImageOutputOptions{},
+		)
+		for k, v := range formatted {
+			result[k] = v
+		}
+		// 将输入图片字节数加入 prompt_tokens
 		inputImageBytes := 0
 		for _, img := range images {
 			inputImageBytes += len(img.Data)
 		}
-		if util.ToBool(body["_internal_task"]) {
-			// 创作台内部任务：只注入 usage
-			injectImageUsageFromData(result, util.Clean(body["prompt"]))
-		} else {
-			// 外部 API 调用：format 处理 b64→URL，并注入 usage
-			originalData := util.AsMapSlice(result["data"])
-			formatted := e.FormatImageResultWithOptions(
-				originalData,
-				util.Clean(body["prompt"]),
-				firstNonEmpty(util.Clean(body["response_format"]), "b64_json"),
-				util.Clean(body["base_url"]),
-				util.Clean(body["owner_id"]),
-				util.Clean(body["owner_name"]),
-				int64(util.ToInt(result["created"], 0)),
-				util.Clean(result["message"]),
-				ImageOutputOptions{},
-			)
-			for k, v := range formatted {
-				result[k] = v
-			}
-			if len(util.AsMapSlice(result["data"])) == 0 && len(originalData) > 0 {
-				result["data"] = originalData
-			}
-			injectImageUsageFromData(result, util.Clean(body["prompt"]))
-		}
-		// 将输入图片字节数加入 prompt_tokens
 		if inputImageBytes > 0 {
 			if usage, ok := result["usage"].(map[string]any); ok {
 				promptTokens := util.ToInt(usage["prompt_tokens"], 0)
@@ -167,6 +181,52 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 			}
 		}
 	}
+	return result, nil, err
+}
+
+// HandleImageEditsInternal 供创作台内部使用，不重复 format
+func (e *Engine) HandleImageEditsInternal(ctx context.Context, body map[string]any, images []UploadedImage) (map[string]any, *StreamResult, error) {
+	encoded := EncodeImages(images)
+	if len(encoded) == 0 {
+		return nil, nil, &ImageGenerationError{Message: "image is required", StatusCode: 502, Type: "server_error", Code: "upstream_error"}
+	}
+	size := util.Clean(body["size"])
+	request := ConversationRequest{
+		Prompt:                 util.Clean(body["prompt"]),
+		Model:                  firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto),
+		N:                      util.ToInt(body["n"], 1),
+		Size:                   size,
+		Quality:                util.Clean(body["quality"]),
+		Background:             util.Clean(body["background"]),
+		Moderation:             util.Clean(body["moderation"]),
+		Style:                  util.Clean(body["style"]),
+		OutputFormat:           NormalizeImageOutputFormat(util.Clean(body["output_format"])),
+		ResponseFormat:         firstNonEmpty(util.Clean(body["response_format"]), "b64_json"),
+		BaseURL:                util.Clean(body["base_url"]),
+		OwnerID:                util.Clean(body["owner_id"]),
+		OwnerName:              util.Clean(body["owner_name"]),
+		Messages:               NormalizeMessages(util.AsMapSlice(body["messages"]), nil),
+		Images:                 encoded,
+		InputImageMask:         responseImageMask(body["input_image_mask"]),
+		MessageAsError:         true,
+		AcquireImageOutputSlot: imageOutputSlotAcquirer(body),
+	}
+	if partialImages, ok := normalizedPositiveInt(body["partial_images"]); ok {
+		request.PartialImages = &partialImages
+	}
+	applyImageToolOptionsToRequest(&request, ImageToolOptionsFromPayload(body))
+	if SupportsImageOutputCompression(request.OutputFormat) {
+		if compression, ok := normalizedImageOutputCompression(body["output_compression"]); ok {
+			request.OutputCompression = &compression
+		}
+	}
+	request = request.Normalized()
+	outputs, errCh := e.StreamImageOutputsWithPool(ctx, request)
+	if util.ToBool(body["stream"]) {
+		return nil, &StreamResult{Items: StreamImageChunks(outputs), Err: errCh, Kind: "openai"}, nil
+	}
+	// 创作台路径：直接返回，streaming 阶段已处理好 URL
+	result, err := e.CollectImageOutputsWithProgress(outputs, errCh, imageOutputProgressCallback(body))
 	return result, nil, err
 }
 
