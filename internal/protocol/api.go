@@ -55,9 +55,10 @@ func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any
 	}
 	result, err := e.CollectImageOutputsWithProgress(outputs, errCh, imageOutputProgressCallback(body))
 	if err == nil && result != nil {
+		originalData := util.AsMapSlice(result["data"])
 		// 将原始 b64 数据转换为 URL，并注入 usage
 		formatted := e.FormatImageResultWithOptions(
-			util.AsMapSlice(result["data"]),
+			originalData,
 			prompt,
 			responseFormat,
 			baseURL,
@@ -70,6 +71,11 @@ func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any
 		// 保留原始 result 中的其他字段（如 output_type、message）
 		for k, v := range formatted {
 			result[k] = v
+		}
+		// 如果 FormatImageResultWithOptions 返回空 data（比如 item 没有 b64_json），
+		// 保留原始 data，避免创作台显示错误
+		if len(util.AsMapSlice(result["data"])) == 0 && len(originalData) > 0 {
+			result["data"] = originalData
 		}
 	}
 	return result, nil, err
@@ -122,8 +128,9 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 		for _, img := range images {
 			inputImageBytes += len(img.Data)
 		}
+		originalData := util.AsMapSlice(result["data"])
 		formatted := e.FormatImageResultWithOptions(
-			util.AsMapSlice(result["data"]),
+			originalData,
 			util.Clean(body["prompt"]),
 			firstNonEmpty(util.Clean(body["response_format"]), "b64_json"),
 			util.Clean(body["base_url"]),
@@ -135,6 +142,10 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 		)
 		for k, v := range formatted {
 			result[k] = v
+		}
+		// 如果 FormatImageResultWithOptions 返回空 data，保留原始 data
+		if len(util.AsMapSlice(result["data"])) == 0 && len(originalData) > 0 {
+			result["data"] = originalData
 		}
 		// 将输入图片字节数加入 prompt_tokens
 		if inputImageBytes > 0 {
