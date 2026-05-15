@@ -210,10 +210,11 @@ type ImageGenerationError struct {
 }
 
 type imageRunResult struct {
-	emitted         bool
-	returnedMessage bool
-	lastError       string
-	err             error
+	emitted              bool
+	returnedMessage      bool
+	lastError            string
+	err                  error
+	triedMessageFallback bool // 是否已尝试过文字响应换账号重试
 }
 
 func (e *ImageGenerationError) Error() string { return e.Message }
@@ -254,6 +255,31 @@ func isTransientImageStreamErrorMessage(message string) bool {
 		if strings.Contains(lower, token) {
 			return true
 		}
+	}
+	return false
+}
+
+// isNonRetryableImageError 判断是否为不可重试的错误（换账号也没用）
+func isNonRetryableImageError(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	// 内容审核拒绝：换账号也会被拒绝
+	if strings.Contains(lower, "image_generation_text_response") {
+		return true
+	}
+	// 权限不足：账号类型不支持
+	if strings.Contains(lower, "plus") || strings.Contains(lower, "pro") || strings.Contains(lower, "team") {
+		return true
+	}
+	// challenge_required：需要人机验证，换账号也没用
+	if strings.Contains(lower, "challenge_required") {
+		return true
+	}
+	// 401 Unauthorized：token 无效或权限不足
+	if strings.Contains(lower, "status=401") || strings.Contains(lower, "unauthorized") {
+		return true
 	}
 	return false
 }
@@ -505,6 +531,18 @@ func (e *Engine) StreamImageOutputsWithPool(ctx context.Context, request Convers
 				defer releaseSlot()
 				result := e.runSingleImageOutput(ctx, out, request, index)
 				if result.err != nil {
+					// 只对可重试的错误换账号重试一次（不取消其他任务）
+					// 不重试：token 无效、权限不足、内容审核等不可恢复错误
+					if !IsTokenInvalidError(result.lastError) && !isNonRetryableImageError(result.lastError) {
+						retryResult := e.runSingleImageOutput(ctx, out, request, index)
+						if retryResult.err != nil {
+							cancel()
+							resultCh <- retryResult
+							return
+						}
+						resultCh <- retryResult
+						return
+					}
 					cancel()
 				}
 				resultCh <- result
@@ -585,6 +623,16 @@ func (e *Engine) runSingleImageOutput(ctx context.Context, out chan<- ImageOutpu
 			if output.Kind == "message" && request.MessageAsError {
 				if e.Accounts != nil {
 					e.Accounts.MarkImageResult(token, false)
+				}
+				// 文字响应时换账号重试一次（可能是账号状态问题，不是 prompt 问题）
+				// 只有在有账号池（Accounts 不为 nil）且未尝试过时才重试
+				if !result.triedMessageFallback && e.Accounts != nil {
+					result.triedMessageFallback = true
+					result.lastError = firstNonEmpty(output.Text, "image_generation_text_response")
+					// 排空当前 outputs channel
+					for range outputs {
+					}
+					break // 跳出 outputs 循环，外层 for 会换账号重试
 				}
 				result.err = &ImageGenerationError{Message: firstNonEmpty(output.Text, "Image generation returned a text response instead of image data."), StatusCode: 400, Type: "invalid_request_error", Code: "image_generation_text_response"}
 				result.lastError = result.err.Error()
