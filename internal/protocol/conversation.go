@@ -1304,11 +1304,21 @@ func CountMessageTokens(messages []map[string]any, model string) int {
 }
 
 func CountTextTokens(text, model string) int {
-	runes := []rune(text)
-	if len(runes) == 0 {
+	if len(text) == 0 {
 		return 0
 	}
-	return (len(runes) + 3) / 4
+	// 分别统计 ASCII 字符和非 ASCII 字符（中文等）
+	// ASCII 字符约 4 个 = 1 token，非 ASCII 字符（中文等）约 1 个 = 1 token
+	asciiCount := 0
+	nonAsciiCount := 0
+	for _, r := range text {
+		if r < 128 {
+			asciiCount++
+		} else {
+			nonAsciiCount++
+		}
+	}
+	return (asciiCount+3)/4 + nonAsciiCount
 }
 
 func EncodeImages(images []UploadedImage) []string {
