@@ -622,7 +622,13 @@ func parseRegisterMailTime(value any) time.Time {
 }
 
 func registerRandomMailboxName() string {
-	return fmt.Sprintf("%s%d%s", randomLower(5), rand.Intn(999), randomLower(2+rand.Intn(2)))
+	// 12 个大小写字母随机组合，增加唯一性
+	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	var b strings.Builder
+	for i := 0; i < 12; i++ {
+		b.WriteByte(chars[rand.Intn(len(chars))])
+	}
+	return b.String()
 }
 
 func registerRandomSubdomainLabel() string {

@@ -1367,10 +1367,9 @@ func registerRandomName() (string, string) {
 }
 
 func registerRandomBirthdate() string {
-	// 扩大年龄范围：1985-2003（22-40岁），更自然的分布
-	year := 1985 + mathrand.Intn(19)
+	// 年龄范围：1988-2005（21-38岁）
+	year := 1988 + mathrand.Intn(18)
 	month := 1 + mathrand.Intn(12)
-	// 根据月份确定最大天数，避免无效日期
 	maxDay := 28
 	switch month {
 	case 1, 3, 5, 7, 8, 10, 12:
