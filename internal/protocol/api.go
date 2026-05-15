@@ -55,27 +55,31 @@ func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any
 	}
 	result, err := e.CollectImageOutputsWithProgress(outputs, errCh, imageOutputProgressCallback(body))
 	if err == nil && result != nil {
-		originalData := util.AsMapSlice(result["data"])
-		// 将原始 b64 数据转换为 URL，并注入 usage
-		formatted := e.FormatImageResultWithOptions(
-			originalData,
-			prompt,
-			responseFormat,
-			baseURL,
-			util.Clean(body["owner_id"]),
-			util.Clean(body["owner_name"]),
-			int64(util.ToInt(result["created"], 0)),
-			util.Clean(result["message"]),
-			ImageOutputOptions{},
-		)
-		// 保留原始 result 中的其他字段（如 output_type、message）
-		for k, v := range formatted {
-			result[k] = v
-		}
-		// 如果 FormatImageResultWithOptions 返回空 data（比如 item 没有 b64_json），
-		// 保留原始 data，避免创作台显示错误
-		if len(util.AsMapSlice(result["data"])) == 0 && len(originalData) > 0 {
-			result["data"] = originalData
+		if util.ToBool(body["_internal_task"]) {
+			// 创作台内部任务：保留原始 data（已由 streaming 阶段处理好 URL），不重复 format
+			// 只注入 usage 供统计
+			injectImageUsageFromData(result, prompt)
+		} else {
+			// 外部 API 调用（NewAPI 等）：需要 format 处理 b64→URL，并注入 usage
+			originalData := util.AsMapSlice(result["data"])
+			formatted := e.FormatImageResultWithOptions(
+				originalData,
+				prompt,
+				responseFormat,
+				baseURL,
+				util.Clean(body["owner_id"]),
+				util.Clean(body["owner_name"]),
+				int64(util.ToInt(result["created"], 0)),
+				util.Clean(result["message"]),
+				ImageOutputOptions{},
+			)
+			for k, v := range formatted {
+				result[k] = v
+			}
+			if len(util.AsMapSlice(result["data"])) == 0 && len(originalData) > 0 {
+				result["data"] = originalData
+			}
+			injectImageUsageFromData(result, prompt)
 		}
 	}
 	return result, nil, err
@@ -123,29 +127,34 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 	}
 	result, err := e.CollectImageOutputsWithProgress(outputs, errCh, imageOutputProgressCallback(body))
 	if err == nil && result != nil {
-		// 将原始 b64 数据转换为 URL，并注入 usage（含输入图片 token）
 		inputImageBytes := 0
 		for _, img := range images {
 			inputImageBytes += len(img.Data)
 		}
-		originalData := util.AsMapSlice(result["data"])
-		formatted := e.FormatImageResultWithOptions(
-			originalData,
-			util.Clean(body["prompt"]),
-			firstNonEmpty(util.Clean(body["response_format"]), "b64_json"),
-			util.Clean(body["base_url"]),
-			util.Clean(body["owner_id"]),
-			util.Clean(body["owner_name"]),
-			int64(util.ToInt(result["created"], 0)),
-			util.Clean(result["message"]),
-			ImageOutputOptions{},
-		)
-		for k, v := range formatted {
-			result[k] = v
-		}
-		// 如果 FormatImageResultWithOptions 返回空 data，保留原始 data
-		if len(util.AsMapSlice(result["data"])) == 0 && len(originalData) > 0 {
-			result["data"] = originalData
+		if util.ToBool(body["_internal_task"]) {
+			// 创作台内部任务：只注入 usage
+			injectImageUsageFromData(result, util.Clean(body["prompt"]))
+		} else {
+			// 外部 API 调用：format 处理 b64→URL，并注入 usage
+			originalData := util.AsMapSlice(result["data"])
+			formatted := e.FormatImageResultWithOptions(
+				originalData,
+				util.Clean(body["prompt"]),
+				firstNonEmpty(util.Clean(body["response_format"]), "b64_json"),
+				util.Clean(body["base_url"]),
+				util.Clean(body["owner_id"]),
+				util.Clean(body["owner_name"]),
+				int64(util.ToInt(result["created"], 0)),
+				util.Clean(result["message"]),
+				ImageOutputOptions{},
+			)
+			for k, v := range formatted {
+				result[k] = v
+			}
+			if len(util.AsMapSlice(result["data"])) == 0 && len(originalData) > 0 {
+				result["data"] = originalData
+			}
+			injectImageUsageFromData(result, util.Clean(body["prompt"]))
 		}
 		// 将输入图片字节数加入 prompt_tokens
 		if inputImageBytes > 0 {
@@ -180,6 +189,28 @@ func imageOutputSlotAcquirer(body map[string]any) ImageOutputSlotAcquirer {
 		return acquire
 	default:
 		return nil
+	}
+}
+
+// injectImageUsageFromData 从 result["data"] 中计算 usage，支持 b64_json 和 url 两种格式
+func injectImageUsageFromData(result map[string]any, prompt string) {
+	data := util.AsMapSlice(result["data"])
+	totalImageBytes := 0
+	for _, item := range data {
+		// 优先用 b64_json 计算
+		if b64 := util.Clean(item["b64_json"]); b64 != "" {
+			totalImageBytes += len(b64) * 3 / 4
+		}
+	}
+	promptTokens := CountTextTokens(prompt, "gpt-image-2")
+	completionTokens := totalImageBytes / 3
+	if completionTokens == 0 && len(data) > 0 {
+		completionTokens = len(data) * 1056 // 降级估算
+	}
+	result["usage"] = map[string]any{
+		"prompt_tokens":     promptTokens,
+		"completion_tokens": completionTokens,
+		"total_tokens":      promptTokens + completionTokens,
 	}
 }
 

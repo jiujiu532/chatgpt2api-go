@@ -95,12 +95,14 @@ func NewApp() (*App, error) {
 	app.tasks = service.NewStoredImageTaskService(filepath.Join(cfg.DataDir, "image_tasks.json"), storageBackend,
 		func(ctx context.Context, identity service.Identity, payload map[string]any) (map[string]any, error) {
 			return app.runLoggedImageTask(ctx, identity, payload, "/api/creation-tasks/image-generations", "文生图", func(ctx context.Context, payload map[string]any) (map[string]any, error) {
+				payload["_internal_task"] = true // 标记为创作台内部任务
 				result, _, err := engine.HandleImageGenerations(ctx, payload)
 				return result, err
 			})
 		},
 		func(ctx context.Context, identity service.Identity, payload map[string]any) (map[string]any, error) {
 			return app.runLoggedImageTask(ctx, identity, payload, "/api/creation-tasks/image-edits", "图生图", func(ctx context.Context, payload map[string]any) (map[string]any, error) {
+				payload["_internal_task"] = true // 标记为创作台内部任务
 				images, _ := payload["images"].([]protocol.UploadedImage)
 				result, _, err := engine.HandleImageEdits(ctx, payload, images)
 				return result, err
