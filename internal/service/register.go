@@ -551,10 +551,8 @@ func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, pass
 	if err != nil {
 		return nil, err
 	}
-	// 409 invalid_state：session 过期，最多重试 3 次
-	for retries := 0; status == http.StatusConflict && retries < 3; retries++ {
-		w.step(fmt.Sprintf("邮箱提交 invalid_state，重新 authorize 后重试（第%d次）", retries+1))
-		time.Sleep(time.Duration(500+retries*500) * time.Millisecond) // 递增延迟
+	if status == http.StatusConflict {
+		w.step("邮箱提交 invalid_state，重新 authorize 后重试")
 		if err := authorizeLogin(); err != nil {
 			return nil, err
 		}
