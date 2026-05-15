@@ -551,8 +551,10 @@ func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, pass
 	if err != nil {
 		return nil, err
 	}
-	if status == http.StatusConflict {
-		w.step("邮箱提交 invalid_state，重新 authorize 后重试")
+	// 409 invalid_state：session 过期，最多重试 3 次
+	for retries := 0; status == http.StatusConflict && retries < 3; retries++ {
+		w.step(fmt.Sprintf("邮箱提交 invalid_state，重新 authorize 后重试（第%d次）", retries+1))
+		time.Sleep(time.Duration(500+retries*500) * time.Millisecond) // 递增延迟
 		if err := authorizeLogin(); err != nil {
 			return nil, err
 		}
@@ -647,12 +649,21 @@ func (w *registerWorker) submitLoginEmail(ctx context.Context, email string) (in
 		return 0, nil, err
 	}
 	headers["openai-sentinel-token"] = token
-	return w.request(ctx, http.MethodPost, registerAuthBase+"/api/accounts/authorize/continue", map[string]any{
+	status, payload, reqErr := w.request(ctx, http.MethodPost, registerAuthBase+"/api/accounts/authorize/continue", map[string]any{
 		"username": map[string]any{
 			"kind":  "email",
 			"value": email,
 		},
 	}, headers, false)
+	if reqErr != nil {
+		return 0, nil, reqErr
+	}
+	// 429 速率限制：直接丢弃，不等待重试
+	if status == http.StatusTooManyRequests {
+		w.step("提交邮箱遇到速率限制（429），直接丢弃本次任务")
+		return status, payload, nil
+	}
+	return status, payload, nil
 }
 
 func (w *registerWorker) followConsentForCode(ctx context.Context, continueURL string) (string, error) {
