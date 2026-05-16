@@ -390,6 +390,13 @@ func (w *registerWorker) run(ctx context.Context) (map[string]any, error) {
 		return nil, fmt.Errorf("mail provider did not return address")
 	}
 	w.step("邮箱创建完成: " + email)
+
+	// 注册结束后（无论成功失败）删除临时邮箱（如 Stalwart）
+	defer func() {
+		if err := deleteRegisterMailboxIfSupported(w.mail, mailbox); err != nil {
+			w.step("临时邮箱删除失败（可忽略）: " + err.Error())
+		}
+	}()
 	password := registerRandomPassword(16)
 	firstName, lastName := registerRandomName()
 	if err := w.platformAuthorize(ctx, email); err != nil {

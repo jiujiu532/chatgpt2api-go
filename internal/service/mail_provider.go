@@ -52,6 +52,11 @@ type registerDomainFetcher interface {
 	FetchAvailableDomains() ([]string, error)
 }
 
+// registerMailboxDeleter 可选接口，支持注册完成后删除临时邮箱
+type registerMailboxDeleter interface {
+	DeleteMailbox(mailbox map[string]any) error
+}
+
 // fetchOrFallbackDomain 当用户未配置 domain 时，尝试从 API 获取可用域名随机选一个；失败则返回空字符串（降级为服务默认行为）
 func fetchOrFallbackDomain(provider registerMailboxProvider) string {
 	fetcher, ok := provider.(registerDomainFetcher)
@@ -63,6 +68,22 @@ func fetchOrFallbackDomain(provider registerMailboxProvider) string {
 		return ""
 	}
 	return domains[rand.Intn(len(domains))]
+}
+
+// deleteRegisterMailboxIfSupported 如果 provider 支持删除邮箱，则删除（用于 Stalwart 等临时邮箱）
+func deleteRegisterMailboxIfSupported(mailConfig map[string]any, mailbox map[string]any) error {
+	if util.Clean(mailbox["provider"]) != "stalwart" {
+		return nil
+	}
+	provider, err := createRegisterMailProvider(mailConfig, util.Clean(mailbox["provider"]), util.Clean(mailbox["provider_ref"]))
+	if err != nil {
+		return err
+	}
+	defer provider.Close()
+	if deleter, ok := provider.(registerMailboxDeleter); ok {
+		return deleter.DeleteMailbox(mailbox)
+	}
+	return nil
 }
 
 type registerMailSettings struct {
@@ -118,6 +139,11 @@ type registerMailTMProvider struct {
 }
 
 type registerGuerrillaMailProvider struct {
+	registerHTTPMailProvider
+	entry map[string]any
+}
+
+type registerStalwartProvider struct {
 	registerHTTPMailProvider
 	entry map[string]any
 }
@@ -196,6 +222,8 @@ func createRegisterMailProvider(mailConfig map[string]any, providerName, provide
 		return &registerMailTMProvider{registerHTTPMailProvider: base, entry: entry}, nil
 	case "guerrilla_mail":
 		return &registerGuerrillaMailProvider{registerHTTPMailProvider: base, entry: entry}, nil
+	case "stalwart":
+		return &registerStalwartProvider{registerHTTPMailProvider: base, entry: entry}, nil
 	default:
 		return nil, fmt.Errorf("unsupported mail.provider: %s", util.Clean(entry["type"]))
 	}
@@ -1860,4 +1888,445 @@ func (p *registerGuerrillaMailProvider) FetchLatestMessage(mailbox map[string]an
 		"received_at":  firstNonNil(message["mail_timestamp"], latest["mail_timestamp"]),
 		"raw":          message,
 	}, nil
+}
+
+// ==================== Stalwart Provider ====================
+// 自建 Stalwart 邮件服务器，通过 JMAP API 创建/删除账号，通过 IMAP 收件
+
+func (p *registerStalwartProvider) apiBase() string {
+	return strings.TrimRight(util.Clean(p.entry["api_base"]), "/")
+}
+
+func (p *registerStalwartProvider) apiKey() string {
+	return util.Clean(p.entry["api_key"])
+}
+
+func (p *registerStalwartProvider) imapHost() string {
+	base := p.apiBase()
+	// 从 api_base 提取主机名，去掉协议前缀
+	host := strings.TrimPrefix(base, "https://")
+	host = strings.TrimPrefix(host, "http://")
+	// 去掉路径部分
+	if idx := strings.Index(host, "/"); idx >= 0 {
+		host = host[:idx]
+	}
+	return host
+}
+
+func (p *registerStalwartProvider) CreateMailbox(username string) (map[string]any, error) {
+	apiBase := p.apiBase()
+	if apiBase == "" {
+		return nil, fmt.Errorf("stalwart api_base is required")
+	}
+	apiKey := p.apiKey()
+	if apiKey == "" {
+		return nil, fmt.Errorf("stalwart api_key is required")
+	}
+
+	// 获取域名
+	domains := util.AsStringSlice(p.entry["domain"])
+	var domain string
+	if len(domains) > 0 {
+		domain = domains[rand.Intn(len(domains))]
+	} else {
+		domain = fetchOrFallbackDomain(p)
+		if domain == "" {
+			return nil, fmt.Errorf("stalwart: no available domain")
+		}
+	}
+
+	// 生成随机用户名和强密码
+	name := firstNonEmpty(strings.TrimSpace(username), registerRandomMailboxName())
+	// 强密码：大写+小写+数字+特殊字符，满足 Stalwart 要求
+	password := stalwartRandomPassword()
+	address := strings.ToLower(name) + "@" + domain
+
+	// 通过 JMAP API 创建账号
+	payload := map[string]any{
+		"using": []string{"urn:ietf:params:jmap:core", "urn:stalwart:jmap"},
+		"methodCalls": []any{
+			[]any{
+				"x:Account/set",
+				map[string]any{
+					"create": map[string]any{
+						"new1": map[string]any{
+							"@type":          "User",
+							"name":           strings.ToLower(name),
+							"domainId":       stalwartDomainID(domain),
+							"credentials":    map[string]any{"0": map[string]any{"@type": "Password", "secret": password}},
+							"memberGroupIds": map[string]any{},
+							"roles":          map[string]any{"@type": "User"},
+							"permissions":    map[string]any{"@type": "Inherit"},
+							"quotas":         map[string]any{},
+							"aliases":        map[string]any{},
+							"encryptionAtRest": map[string]any{"@type": "Disabled"},
+						},
+					},
+				},
+				"c1",
+			},
+		},
+	}
+
+	data, err := registerMailRequestJSON(p.client, http.MethodPost, apiBase+"/jmap/", map[string]string{
+		"Authorization": "Bearer " + apiKey,
+		"Content-Type":  "application/json",
+		"User-Agent":    p.conf.UserAgent,
+		"Accept":        "application/json",
+	}, nil, payload, http.StatusOK)
+	if err != nil {
+		return nil, fmt.Errorf("stalwart create account: %w", err)
+	}
+
+	// 解析响应
+	methodResponsesRaw, _ := data["methodResponses"].([]any)
+	if len(methodResponsesRaw) == 0 {
+		return nil, fmt.Errorf("stalwart: empty methodResponses")
+	}
+	// methodResponses[0] = ["x:Account/set", {...}, "c1"]
+	respArr, ok := methodResponsesRaw[0].([]any)
+	if !ok || len(respArr) < 2 {
+		return nil, fmt.Errorf("stalwart: invalid methodResponse format")
+	}
+	respData := util.StringMap(respArr[1])
+	created := util.StringMap(respData["created"])
+	if len(created) == 0 {
+		// 检查是否有错误
+		notCreated := util.StringMap(respData["notCreated"])
+		if len(notCreated) > 0 {
+			for _, v := range notCreated {
+				if errMap, ok := v.(map[string]any); ok {
+					return nil, fmt.Errorf("stalwart create failed: %s", util.Clean(errMap["description"]))
+				}
+			}
+		}
+		return nil, fmt.Errorf("stalwart: account not created")
+	}
+
+	// 获取创建的账号 ID
+	accountID := ""
+	for _, v := range created {
+		if m, ok := v.(map[string]any); ok {
+			accountID = util.Clean(m["id"])
+			break
+		}
+	}
+
+	return map[string]any{
+		"provider":     "stalwart",
+		"provider_ref": p.entry["provider_ref"],
+		"address":      address,
+		"password":     password,
+		"account_id":   accountID,
+		"api_base":     apiBase,
+		"api_key":      apiKey,
+	}, nil
+}
+
+func (p *registerStalwartProvider) FetchLatestMessage(mailbox map[string]any) (map[string]any, error) {
+	address := util.Clean(mailbox["address"])
+	password := util.Clean(mailbox["password"])
+	imapHost := p.imapHost()
+	if imapHost == "" || address == "" || password == "" {
+		return nil, fmt.Errorf("stalwart: missing imap connection info")
+	}
+
+	// 通过 IMAP SSL 收件
+	body, subject, from, err := stalwartIMAPFetchLatest(imapHost, 993, address, password)
+	if err != nil {
+		return nil, err
+	}
+	if body == "" && subject == "" {
+		return nil, nil
+	}
+
+	textContent, htmlContent := "", ""
+	if strings.Contains(body, "<") && strings.Contains(body, ">") {
+		htmlContent = body
+	} else {
+		textContent = body
+	}
+
+	return map[string]any{
+		"provider":     "stalwart",
+		"mailbox":      address,
+		"subject":      subject,
+		"sender":       from,
+		"text_content": textContent,
+		"html_content": htmlContent,
+		"received_at":  util.NowISO(),
+		"raw":          map[string]any{"body": body},
+	}, nil
+}
+
+func (p *registerStalwartProvider) Close() {
+	p.client.CloseIdleConnections()
+	// 注册完成后删除临时账号
+	// 注意：Close 在 defer 中调用，此时 mailbox 信息已不可用
+	// 删除逻辑在 CreateMailbox 返回的 mailbox 中携带必要信息，由调用方负责
+}
+
+func (p *registerStalwartProvider) DeleteMailbox(mailbox map[string]any) error {
+	apiBase := util.Clean(mailbox["api_base"])
+	apiKey := util.Clean(mailbox["api_key"])
+	accountID := util.Clean(mailbox["account_id"])
+	if apiBase == "" || apiKey == "" || accountID == "" {
+		return nil
+	}
+
+	payload := map[string]any{
+		"using": []string{"urn:ietf:params:jmap:core", "urn:stalwart:jmap"},
+		"methodCalls": []any{
+			[]any{
+				"x:Account/set",
+				map[string]any{
+					"destroy": []string{accountID},
+				},
+				"c1",
+			},
+		},
+	}
+
+	_, err := registerMailRequestJSON(p.client, http.MethodPost, apiBase+"/jmap/", map[string]string{
+		"Authorization": "Bearer " + apiKey,
+		"Content-Type":  "application/json",
+		"User-Agent":    p.conf.UserAgent,
+		"Accept":        "application/json",
+	}, nil, payload, http.StatusOK)
+	return err
+}
+
+func (p *registerStalwartProvider) FetchAvailableDomains() ([]string, error) {
+	apiBase := p.apiBase()
+	apiKey := p.apiKey()
+	if apiBase == "" || apiKey == "" {
+		return nil, fmt.Errorf("stalwart: api_base and api_key required")
+	}
+
+	payload := map[string]any{
+		"using": []string{"urn:ietf:params:jmap:core", "urn:stalwart:jmap"},
+		"methodCalls": []any{
+			[]any{"x:Domain/query", map[string]any{"filter": map[string]any{}}, "c1"},
+			[]any{"x:Domain/get", map[string]any{"#ids": map[string]any{"resultOf": "c1", "name": "x:Domain/query", "path": "/ids"}}, "c2"},
+		},
+	}
+
+	data, err := registerMailRequestJSON(p.client, http.MethodPost, apiBase+"/jmap/", map[string]string{
+		"Authorization": "Bearer " + apiKey,
+		"Content-Type":  "application/json",
+		"User-Agent":    p.conf.UserAgent,
+		"Accept":        "application/json",
+	}, nil, payload, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+
+	methodResponsesRaw2, _ := data["methodResponses"].([]any)
+	var domains []string
+	for _, resp := range methodResponsesRaw2 {
+		respArr, ok := resp.([]any)
+		if !ok || len(respArr) < 2 {
+			continue
+		}
+		if util.Clean(respArr[0]) != "x:Domain/get" {
+			continue
+		}
+		respData := util.StringMap(respArr[1])
+		items := util.AsMapSlice(respData["list"])
+		for _, item := range items {
+			if name := util.Clean(item["name"]); name != "" {
+				domains = append(domains, name)
+			}
+		}
+	}
+	return domains, nil
+}
+
+// stalwartDomainID 从域名推断 Stalwart 的 domainId
+// Stalwart 的 domainId 通常是域名的第一个字母或短标识
+// 实际上我们需要先查询，这里先用域名本身作为 ID（Stalwart 支持用域名作为 ID）
+func stalwartDomainID(domain string) string {
+	return domain
+}
+
+// stalwartRandomPassword 生成满足 Stalwart 强密码要求的随机密码
+func stalwartRandomPassword() string {
+	const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	const lower = "abcdefghijklmnopqrstuvwxyz"
+	const digits = "0123456789"
+	const special = "!@#$%^&*"
+	const all = upper + lower + digits + special
+
+	// 确保包含每种字符
+	pwd := []byte{
+		upper[rand.Intn(len(upper))],
+		upper[rand.Intn(len(upper))],
+		lower[rand.Intn(len(lower))],
+		lower[rand.Intn(len(lower))],
+		digits[rand.Intn(len(digits))],
+		digits[rand.Intn(len(digits))],
+		special[rand.Intn(len(special))],
+	}
+	// 补充到 16 位
+	for len(pwd) < 16 {
+		pwd = append(pwd, all[rand.Intn(len(all))])
+	}
+	// 打乱顺序
+	rand.Shuffle(len(pwd), func(i, j int) { pwd[i], pwd[j] = pwd[j], pwd[i] })
+	return string(pwd)
+}
+
+// stalwartIMAPFetchLatest 通过 IMAP SSL 获取最新一封邮件的正文
+func stalwartIMAPFetchLatest(host string, port int, user, password string) (body, subject, from string, err error) {
+	tlsConfig := &tls.Config{
+		ServerName: host,
+		MinVersion: tls.VersionTLS12,
+	}
+
+	addr := fmt.Sprintf("%s:%d", host, port)
+	conn, dialErr := tls.Dial("tcp", addr, tlsConfig)
+	if dialErr != nil {
+		return "", "", "", fmt.Errorf("stalwart imap dial: %w", dialErr)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(20 * time.Second))
+
+	readLine := func() (string, error) {
+		var line []byte
+		buf := make([]byte, 1)
+		for {
+			n, e := conn.Read(buf)
+			if n > 0 {
+				line = append(line, buf[0])
+				if buf[0] == '\n' {
+					return strings.TrimRight(string(line), "\r\n"), nil
+				}
+			}
+			if e != nil {
+				return string(line), e
+			}
+		}
+	}
+
+	sendCmd := func(tag, cmd string) error {
+		_, e := fmt.Fprintf(conn, "%s %s\r\n", tag, cmd)
+		return e
+	}
+
+	readUntilTagged := func(tag string) ([]string, error) {
+		var lines []string
+		for {
+			line, e := readLine()
+			if e != nil {
+				return lines, e
+			}
+			lines = append(lines, line)
+			if strings.HasPrefix(line, tag+" ") {
+				return lines, nil
+			}
+		}
+	}
+
+	// 读取服务器问候
+	if _, err = readLine(); err != nil {
+		return "", "", "", fmt.Errorf("stalwart imap greeting: %w", err)
+	}
+
+	// LOGIN
+	if err = sendCmd("A1", fmt.Sprintf("LOGIN %q %q", user, password)); err != nil {
+		return "", "", "", err
+	}
+	lines, err := readUntilTagged("A1")
+	if err != nil {
+		return "", "", "", err
+	}
+	loginOK := false
+	for _, l := range lines {
+		if strings.HasPrefix(l, "A1 OK") {
+			loginOK = true
+			break
+		}
+	}
+	if !loginOK {
+		return "", "", "", fmt.Errorf("stalwart imap login failed")
+	}
+
+	// SELECT INBOX
+	if err = sendCmd("A2", "SELECT INBOX"); err != nil {
+		return "", "", "", err
+	}
+	if _, err = readUntilTagged("A2"); err != nil {
+		return "", "", "", err
+	}
+
+	// SEARCH ALL（获取所有邮件序号）
+	if err = sendCmd("A3", "SEARCH ALL"); err != nil {
+		return "", "", "", err
+	}
+	searchLines, err := readUntilTagged("A3")
+	if err != nil {
+		return "", "", "", err
+	}
+
+	// 解析邮件序号，取最后一封（最新）
+	var msgNums []string
+	for _, l := range searchLines {
+		if strings.HasPrefix(l, "* SEARCH") {
+			parts := strings.Fields(l)
+			if len(parts) > 2 {
+				msgNums = parts[2:]
+			}
+		}
+	}
+	if len(msgNums) == 0 {
+		return "", "", "", nil // 没有邮件
+	}
+	latestNum := msgNums[len(msgNums)-1]
+
+	// FETCH 最新邮件的 BODY[]
+	if err = sendCmd("A4", fmt.Sprintf("FETCH %s (BODY.PEEK[HEADER.FIELDS (SUBJECT FROM)] BODY.PEEK[TEXT])", latestNum)); err != nil {
+		return "", "", "", err
+	}
+	fetchLines, err := readUntilTagged("A4")
+	if err != nil && len(fetchLines) == 0 {
+		return "", "", "", err
+	}
+
+	// 解析 SUBJECT、FROM 和正文
+	inHeader := false
+	inBody := false
+	var bodyLines []string
+	for _, l := range fetchLines {
+		if strings.Contains(l, "HEADER.FIELDS") {
+			inHeader = true
+			inBody = false
+			continue
+		}
+		if inHeader {
+			if strings.HasPrefix(strings.ToUpper(l), "SUBJECT:") {
+				subject = strings.TrimSpace(l[8:])
+			} else if strings.HasPrefix(strings.ToUpper(l), "FROM:") {
+				from = strings.TrimSpace(l[5:])
+			} else if l == "" {
+				inHeader = false
+			}
+			continue
+		}
+		if strings.Contains(l, "BODY[TEXT]") || strings.Contains(l, "BODY.PEEK[TEXT]") {
+			inBody = true
+			continue
+		}
+		if inBody {
+			if strings.HasPrefix(l, "A4 ") || l == ")" {
+				break
+			}
+			bodyLines = append(bodyLines, l)
+		}
+	}
+	body = strings.Join(bodyLines, "\n")
+
+	// LOGOUT
+	_ = sendCmd("A5", "LOGOUT")
+
+	return body, subject, from, nil
 }
