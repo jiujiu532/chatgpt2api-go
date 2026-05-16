@@ -2239,13 +2239,6 @@ func (p *registerStalwartProvider) FetchAvailableDomains() ([]string, error) {
 	return domains, nil
 }
 
-// stalwartDomainID 从域名推断 Stalwart 的 domainId
-// Stalwart 的 domainId 通常是域名的第一个字母或短标识
-// 实际上我们需要先查询，这里先用域名本身作为 ID（Stalwart 支持用域名作为 ID）
-func stalwartDomainID(domain string) string {
-	return domain
-}
-
 // stalwartRandomPassword 生成满足 Stalwart 强密码要求的随机密码
 func stalwartRandomPassword() string {
 	const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
