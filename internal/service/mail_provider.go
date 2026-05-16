@@ -1953,23 +1953,43 @@ func (p *registerStalwartProvider) CreateMailbox(username string) (map[string]an
 		return nil, fmt.Errorf("stalwart api_key is required")
 	}
 
-	// 获取域名
-	domains := util.AsStringSlice(p.entry["domain"])
-	var domain string
-	if len(domains) > 0 {
-		domain = domains[rand.Intn(len(domains))]
-	} else {
-		domain = fetchOrFallbackDomain(p)
-		if domain == "" {
-			return nil, fmt.Errorf("stalwart: no available domain")
+	// 获取域名及其 ID
+	domainMap, err := p.fetchDomainMap(apiBase, apiKey)
+	if err != nil {
+		return nil, fmt.Errorf("stalwart fetch domains: %w", err)
+	}
+	if len(domainMap) == 0 {
+		return nil, fmt.Errorf("stalwart: no available domains")
+	}
+
+	// 从配置域名中选择，或随机选一个
+	configDomains := util.AsStringSlice(p.entry["domain"])
+	var selectedDomain, selectedDomainID string
+	if len(configDomains) > 0 {
+		// 从配置域名中找到有效的
+		for _, d := range configDomains {
+			d = strings.TrimSpace(strings.ToLower(d))
+			if id, ok := domainMap[d]; ok {
+				selectedDomain = d
+				selectedDomainID = id
+				break
+			}
 		}
+	}
+	if selectedDomain == "" {
+		// 随机选一个可用域名
+		keys := make([]string, 0, len(domainMap))
+		for k := range domainMap {
+			keys = append(keys, k)
+		}
+		selectedDomain = keys[rand.Intn(len(keys))]
+		selectedDomainID = domainMap[selectedDomain]
 	}
 
 	// 生成随机用户名和强密码
-	name := firstNonEmpty(strings.TrimSpace(username), registerRandomMailboxName())
-	// 强密码：大写+小写+数字+特殊字符，满足 Stalwart 要求
+	name := strings.ToLower(firstNonEmpty(strings.TrimSpace(username), registerRandomMailboxName()))
 	password := stalwartRandomPassword()
-	address := strings.ToLower(name) + "@" + domain
+	address := name + "@" + selectedDomain
 
 	// 通过 JMAP API 创建账号
 	payload := map[string]any{
@@ -1980,15 +2000,15 @@ func (p *registerStalwartProvider) CreateMailbox(username string) (map[string]an
 				map[string]any{
 					"create": map[string]any{
 						"new1": map[string]any{
-							"@type":          "User",
-							"name":           strings.ToLower(name),
-							"domainId":       stalwartDomainID(domain),
-							"credentials":    map[string]any{"0": map[string]any{"@type": "Password", "secret": password}},
-							"memberGroupIds": map[string]any{},
-							"roles":          map[string]any{"@type": "User"},
-							"permissions":    map[string]any{"@type": "Inherit"},
-							"quotas":         map[string]any{},
-							"aliases":        map[string]any{},
+							"@type":            "User",
+							"name":             name,
+							"domainId":         selectedDomainID,
+							"credentials":      map[string]any{"0": map[string]any{"@type": "Password", "secret": password}},
+							"memberGroupIds":   map[string]any{},
+							"roles":            map[string]any{"@type": "User"},
+							"permissions":      map[string]any{"@type": "Inherit"},
+							"quotas":           map[string]any{},
+							"aliases":          map[string]any{},
 							"encryptionAtRest": map[string]any{"@type": "Disabled"},
 						},
 					},
@@ -2013,7 +2033,6 @@ func (p *registerStalwartProvider) CreateMailbox(username string) (map[string]an
 	if len(methodResponsesRaw) == 0 {
 		return nil, fmt.Errorf("stalwart: empty methodResponses")
 	}
-	// methodResponses[0] = ["x:Account/set", {...}, "c1"]
 	respArr, ok := methodResponsesRaw[0].([]any)
 	if !ok || len(respArr) < 2 {
 		return nil, fmt.Errorf("stalwart: invalid methodResponse format")
@@ -2021,7 +2040,6 @@ func (p *registerStalwartProvider) CreateMailbox(username string) (map[string]an
 	respData := util.StringMap(respArr[1])
 	created := util.StringMap(respData["created"])
 	if len(created) == 0 {
-		// 检查是否有错误
 		notCreated := util.StringMap(respData["notCreated"])
 		if len(notCreated) > 0 {
 			for _, v := range notCreated {
@@ -2033,7 +2051,6 @@ func (p *registerStalwartProvider) CreateMailbox(username string) (map[string]an
 		return nil, fmt.Errorf("stalwart: account not created")
 	}
 
-	// 获取创建的账号 ID
 	accountID := ""
 	for _, v := range created {
 		if m, ok := v.(map[string]any); ok {
@@ -2046,11 +2063,61 @@ func (p *registerStalwartProvider) CreateMailbox(username string) (map[string]an
 		"provider":     "stalwart",
 		"provider_ref": p.entry["provider_ref"],
 		"address":      address,
+		"domain":       selectedDomain,
 		"password":     password,
 		"account_id":   accountID,
 		"api_base":     apiBase,
 		"api_key":      apiKey,
 	}, nil
+}
+
+// fetchDomainMap 获取 Stalwart 的域名列表，返回 domain->id 的映射
+func (p *registerStalwartProvider) fetchDomainMap(apiBase, apiKey string) (map[string]string, error) {
+	payload := map[string]any{
+		"using": []string{"urn:ietf:params:jmap:core", "urn:stalwart:jmap"},
+		"methodCalls": []any{
+			[]any{"x:Domain/query", map[string]any{"filter": map[string]any{}}, "c1"},
+			[]any{"x:Domain/get", map[string]any{
+				"#ids": map[string]any{
+					"resultOf": "c1",
+					"name":     "x:Domain/query",
+					"path":     "/ids",
+				},
+			}, "c2"},
+		},
+	}
+
+	data, err := registerMailRequestJSON(p.client, http.MethodPost, apiBase+"/jmap/", map[string]string{
+		"Authorization": "Bearer " + apiKey,
+		"Content-Type":  "application/json",
+		"User-Agent":    p.conf.UserAgent,
+		"Accept":        "application/json",
+	}, nil, payload, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+
+	result := map[string]string{}
+	methodResponsesRaw, _ := data["methodResponses"].([]any)
+	for _, resp := range methodResponsesRaw {
+		respArr, ok := resp.([]any)
+		if !ok || len(respArr) < 2 {
+			continue
+		}
+		if util.Clean(respArr[0]) != "x:Domain/get" {
+			continue
+		}
+		respData := util.StringMap(respArr[1])
+		items := util.AsMapSlice(respData["list"])
+		for _, item := range items {
+			id := util.Clean(item["id"])
+			name := util.Clean(item["name"])
+			if id != "" && name != "" {
+				result[strings.ToLower(name)] = id
+			}
+		}
+	}
+	return result, nil
 }
 
 func (p *registerStalwartProvider) FetchLatestMessage(mailbox map[string]any) (map[string]any, error) {
