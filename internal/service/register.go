@@ -120,12 +120,13 @@ type registerWorkerResult struct {
 }
 
 type registerWorker struct {
-	service  *RegisterService
-	index    int
-	config   map[string]any
-	mail     map[string]any
-	client   *http.Client
-	deviceID string
+	service     *RegisterService
+	index       int
+	config      map[string]any
+	mail        map[string]any
+	client      *http.Client
+	deviceID    string
+	lastMailbox map[string]any // 记录最后使用的邮箱信息，用于声誉统计
 }
 
 type registerSentinelTokenGenerator struct {
@@ -135,6 +136,8 @@ type registerSentinelTokenGenerator struct {
 }
 
 func NewRegisterService(dataDir string, accounts *AccountService, backend ...storage.Backend) *RegisterService {
+	// 初始化域名声誉存储
+	InitDomainReputation(dataDir)
 	s := &RegisterService{
 		path:        filepath.Join(dataDir, "register.json"),
 		store:       firstJSONDocumentStore(backend),
@@ -314,6 +317,23 @@ func (s *RegisterService) runWorker(index int, config map[string]any) registerWo
 	cost := time.Since(start).Seconds()
 	if runErr != nil {
 		s.appendLog(fmt.Sprintf("任务%d 注册失败，本次耗时%.1fs，原因: %v", index, cost, runErr), "red")
+		// 记录域名失败声誉
+		if GlobalDomainReputation != nil && worker.lastMailbox != nil {
+			provider := util.Clean(worker.lastMailbox["provider"])
+			domain := util.Clean(worker.lastMailbox["domain"])
+			if domain == "" {
+				addr := util.Clean(worker.lastMailbox["address"])
+				if idx := strings.LastIndex(addr, "@"); idx >= 0 {
+					domain = addr[idx+1:]
+				}
+			}
+			if provider != "" && domain != "" {
+				bucket, disabledNow := GlobalDomainReputation.RecordFailure(provider, domain, runErr.Error())
+				if disabledNow {
+					s.appendLog(fmt.Sprintf("邮箱域名已自动拉黑: %s（%s），原因: %s", domain, bucket, runErr.Error()), "yellow")
+				}
+			}
+		}
 		return registerWorkerResult{ok: false, index: index, err: runErr.Error(), cost: cost}
 	}
 	accessToken := util.Clean(result["access_token"])
@@ -321,6 +341,20 @@ func (s *RegisterService) runWorker(index int, config map[string]any) registerWo
 		err = fmt.Errorf("register flow did not return access_token")
 		s.appendLog(fmt.Sprintf("任务%d 注册失败，本次耗时%.1fs，原因: %v", index, cost, err), "red")
 		return registerWorkerResult{ok: false, index: index, err: err.Error(), cost: cost}
+	}
+	// 记录域名成功声誉
+	if GlobalDomainReputation != nil && worker.lastMailbox != nil {
+		provider := util.Clean(worker.lastMailbox["provider"])
+		domain := util.Clean(worker.lastMailbox["domain"])
+		if domain == "" {
+			addr := util.Clean(worker.lastMailbox["address"])
+			if idx := strings.LastIndex(addr, "@"); idx >= 0 {
+				domain = addr[idx+1:]
+			}
+		}
+		if provider != "" && domain != "" {
+			GlobalDomainReputation.RecordSuccess(provider, domain)
+		}
 	}
 	if s.accounts != nil {
 		s.accounts.AddAccounts([]string{accessToken})
@@ -390,6 +424,7 @@ func (w *registerWorker) run(ctx context.Context) (map[string]any, error) {
 		return nil, fmt.Errorf("mail provider did not return address")
 	}
 	w.step("邮箱创建完成: " + email)
+	w.lastMailbox = mailbox // 保存邮箱信息用于声誉统计
 
 	// 注册结束后（无论成功失败）删除临时邮箱（如 Stalwart）
 	defer func() {

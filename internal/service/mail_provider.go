@@ -1363,18 +1363,42 @@ func registerInbucketMailboxName(address string) string {
 
 func (p *registerYYDSMailProvider) CreateMailbox(username string) (map[string]any, error) {
 	payload := map[string]any{"localPart": firstNonEmpty(strings.TrimSpace(username), registerRandomMailboxName())}
-	if domains := util.AsStringSlice(p.entry["domain"]); len(domains) > 0 {
-		domain, err := nextRegisterDomain(domains)
+
+	// 域名选择：优先使用声誉系统过滤后的配置域名，其次用历史好域名，最后从 API 获取
+	configDomains := util.AsStringSlice(p.entry["domain"])
+	var selectedDomain string
+	if len(configDomains) > 0 {
+		// 用声誉系统过滤掉被拉黑的域名
+		var filteredDomains []string
+		if GlobalDomainReputation != nil {
+			filteredDomains = GlobalDomainReputation.FilterDomains("yyds_mail", configDomains)
+		} else {
+			filteredDomains = configDomains
+		}
+		if len(filteredDomains) == 0 {
+			filteredDomains = configDomains // 全被拉黑时降级使用全部
+		}
+		domain, err := nextRegisterDomain(filteredDomains)
 		if err != nil {
 			return nil, err
 		}
-		payload["domain"] = domain
+		selectedDomain = domain
 	} else {
-		// 用户未配置域名，尝试从 API 获取可用域名随机选一个
-		if domain := fetchOrFallbackDomain(p); domain != "" {
-			payload["domain"] = domain
+		// 未配置域名：先用历史好域名，再从 API 获取
+		if GlobalDomainReputation != nil {
+			goodDomains := GlobalDomainReputation.GoodDomains("yyds_mail")
+			if len(goodDomains) > 0 {
+				selectedDomain = goodDomains[rand.Intn(minInt(len(goodDomains), 5))] // 从前5个好域名随机选
+			}
+		}
+		if selectedDomain == "" {
+			selectedDomain = fetchOrFallbackDomain(p)
 		}
 	}
+	if selectedDomain != "" {
+		payload["domain"] = selectedDomain
+	}
+
 	if subdomain := util.Clean(p.entry["subdomain"]); subdomain != "" {
 		payload["subdomain"] = subdomain
 	}
@@ -1392,10 +1416,16 @@ func (p *registerYYDSMailProvider) CreateMailbox(username string) (map[string]an
 	if address == "" || token == "" {
 		return nil, fmt.Errorf("YYDSMail missing address or token")
 	}
+	// 提取实际使用的域名（用于声誉记录）
+	domain := selectedDomain
+	if domain == "" && strings.Contains(address, "@") {
+		domain = address[strings.LastIndex(address, "@")+1:]
+	}
 	return map[string]any{
 		"provider":     "yyds_mail",
 		"provider_ref": p.entry["provider_ref"],
 		"address":      address,
+		"domain":       domain,
 		"token":        token,
 		"account_id":   util.Clean(body["id"]),
 	}, nil
