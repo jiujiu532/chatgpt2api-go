@@ -1966,18 +1966,22 @@ func (p *registerStalwartProvider) CreateMailbox(username string) (map[string]an
 	configDomains := util.AsStringSlice(p.entry["domain"])
 	var selectedDomain, selectedDomainID string
 	if len(configDomains) > 0 {
-		// 从配置域名中找到有效的
+		// 收集所有在 Stalwart 中存在的配置域名
+		var validDomains []string
 		for _, d := range configDomains {
 			d = strings.TrimSpace(strings.ToLower(d))
-			if id, ok := domainMap[d]; ok {
-				selectedDomain = d
-				selectedDomainID = id
-				break
+			if _, ok := domainMap[d]; ok {
+				validDomains = append(validDomains, d)
 			}
+		}
+		if len(validDomains) > 0 {
+			// 随机选一个
+			selectedDomain = validDomains[rand.Intn(len(validDomains))]
+			selectedDomainID = domainMap[selectedDomain]
 		}
 	}
 	if selectedDomain == "" {
-		// 随机选一个可用域名
+		// 没有配置域名或全部无效，随机选一个 Stalwart 中的域名
 		keys := make([]string, 0, len(domainMap))
 		for k := range domainMap {
 			keys = append(keys, k)
