@@ -2123,12 +2123,150 @@ func (p *registerStalwartProvider) fetchDomainMap(apiBase, apiKey string) (map[s
 func (p *registerStalwartProvider) FetchLatestMessage(mailbox map[string]any) (map[string]any, error) {
 	address := util.Clean(mailbox["address"])
 	password := util.Clean(mailbox["password"])
-	imapHost := p.imapHost()
-	if imapHost == "" || address == "" || password == "" {
-		return nil, fmt.Errorf("stalwart: missing imap connection info")
+	apiBase := p.apiBase()
+	if apiBase == "" || address == "" || password == "" {
+		return nil, fmt.Errorf("stalwart: missing connection info")
 	}
 
-	// 通过 IMAP SSL 收件
+	// 用账号自己的凭据获取 JMAP session token
+	// Stalwart 支持用邮箱账号密码通过 Basic Auth 访问 JMAP
+	authHeader := "Basic " + base64.StdEncoding.EncodeToString([]byte(address+":"+password))
+
+	// 获取 JMAP session，拿到 accountId
+	sessionData, err := registerMailRequestJSON(p.client, http.MethodGet, apiBase+"/jmap/session", map[string]string{
+		"Authorization": authHeader,
+		"User-Agent":    p.conf.UserAgent,
+		"Accept":        "application/json",
+	}, nil, nil, http.StatusOK)
+	if err != nil {
+		// JMAP session 失败，降级到 IMAP
+		return p.fetchLatestMessageIMAP(mailbox)
+	}
+
+	// 获取 accountId
+	accounts := util.StringMap(sessionData["accounts"])
+	accountID := ""
+	for id := range accounts {
+		accountID = id
+		break
+	}
+	if accountID == "" {
+		return p.fetchLatestMessageIMAP(mailbox)
+	}
+
+	// 查询收件箱邮件列表
+	queryPayload := map[string]any{
+		"using": []string{"urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"},
+		"methodCalls": []any{
+			[]any{
+				"Email/query",
+				map[string]any{
+					"accountId": accountID,
+					"sort":      []map[string]any{{"property": "receivedAt", "isAscending": false}},
+					"limit":     1,
+				},
+				"c1",
+			},
+			[]any{
+				"Email/get",
+				map[string]any{
+					"accountId": accountID,
+					"#ids": map[string]any{
+						"resultOf": "c1",
+						"name":     "Email/query",
+						"path":     "/ids",
+					},
+					"properties": []string{"subject", "from", "textBody", "htmlBody", "bodyValues", "receivedAt"},
+					"fetchTextBodyValues": true,
+					"fetchHTMLBodyValues": true,
+				},
+				"c2",
+			},
+		},
+	}
+
+	data, err := registerMailRequestJSON(p.client, http.MethodPost, apiBase+"/jmap/", map[string]string{
+		"Authorization": authHeader,
+		"Content-Type":  "application/json",
+		"User-Agent":    p.conf.UserAgent,
+		"Accept":        "application/json",
+	}, nil, queryPayload, http.StatusOK)
+	if err != nil {
+		return p.fetchLatestMessageIMAP(mailbox)
+	}
+
+	// 解析邮件
+	methodResponsesRaw, _ := data["methodResponses"].([]any)
+	for _, resp := range methodResponsesRaw {
+		respArr, ok := resp.([]any)
+		if !ok || len(respArr) < 2 {
+			continue
+		}
+		if util.Clean(respArr[0]) != "Email/get" {
+			continue
+		}
+		respData := util.StringMap(respArr[1])
+		emails := util.AsMapSlice(respData["list"])
+		if len(emails) == 0 {
+			return nil, nil
+		}
+		email := emails[0]
+		subject := util.Clean(email["subject"])
+		bodyValues := util.StringMap(email["bodyValues"])
+
+		// 提取正文
+		textContent, htmlContent := "", ""
+		textBodies := util.AsMapSlice(email["textBody"])
+		htmlBodies := util.AsMapSlice(email["htmlBody"])
+		for _, part := range textBodies {
+			partID := util.Clean(part["partId"])
+			if bv := util.StringMap(bodyValues[partID]); len(bv) > 0 {
+				textContent = util.Clean(bv["value"])
+				break
+			}
+		}
+		for _, part := range htmlBodies {
+			partID := util.Clean(part["partId"])
+			if bv := util.StringMap(bodyValues[partID]); len(bv) > 0 {
+				htmlContent = util.Clean(bv["value"])
+				break
+			}
+		}
+
+		// 提取发件人
+		from := ""
+		if fromList, ok := email["from"].([]any); ok && len(fromList) > 0 {
+			if fromMap, ok := fromList[0].(map[string]any); ok {
+				from = firstNonEmpty(util.Clean(fromMap["email"]), util.Clean(fromMap["name"]))
+			}
+		}
+
+		if textContent == "" && htmlContent == "" {
+			return nil, nil
+		}
+
+		return map[string]any{
+			"provider":     "stalwart",
+			"mailbox":      address,
+			"subject":      subject,
+			"sender":       from,
+			"text_content": textContent,
+			"html_content": htmlContent,
+			"received_at":  util.Clean(email["receivedAt"]),
+			"raw":          email,
+		}, nil
+	}
+	return nil, nil
+}
+
+// fetchLatestMessageIMAP 降级到 IMAP 收件
+func (p *registerStalwartProvider) fetchLatestMessageIMAP(mailbox map[string]any) (map[string]any, error) {
+	address := util.Clean(mailbox["address"])
+	password := util.Clean(mailbox["password"])
+	imapHost := p.imapHost()
+	if imapHost == "" {
+		return nil, fmt.Errorf("stalwart: cannot determine imap host")
+	}
 	body, subject, from, err := stalwartIMAPFetchLatest(imapHost, 993, address, password)
 	if err != nil {
 		return nil, err
@@ -2136,14 +2274,12 @@ func (p *registerStalwartProvider) FetchLatestMessage(mailbox map[string]any) (m
 	if body == "" && subject == "" {
 		return nil, nil
 	}
-
 	textContent, htmlContent := "", ""
 	if strings.Contains(body, "<") && strings.Contains(body, ">") {
 		htmlContent = body
 	} else {
 		textContent = body
 	}
-
 	return map[string]any{
 		"provider":     "stalwart",
 		"mailbox":      address,
