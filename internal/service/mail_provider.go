@@ -148,6 +148,11 @@ type registerStalwartProvider struct {
 	entry map[string]any
 }
 
+type registerAhemProvider struct {
+	registerHTTPMailProvider
+	entry map[string]any
+}
+
 // stalwart 域名映射缓存（全局，避免高并发下重复查询）
 var (
 	stalwartDomainCacheMu      sync.Mutex
@@ -236,6 +241,8 @@ func createRegisterMailProvider(mailConfig map[string]any, providerName, provide
 		return &registerGuerrillaMailProvider{registerHTTPMailProvider: base, entry: entry}, nil
 	case "stalwart":
 		return &registerStalwartProvider{registerHTTPMailProvider: base, entry: entry}, nil
+	case "ahem":
+		return &registerAhemProvider{registerHTTPMailProvider: base, entry: entry}, nil
 	default:
 		return nil, fmt.Errorf("unsupported mail.provider: %s", util.Clean(entry["type"]))
 	}
@@ -2587,4 +2594,137 @@ func stalwartIMAPFetchLatest(host string, port int, user, password string) (body
 	_ = sendCmd("A5", "LOGOUT")
 
 	return body, subject, from, nil
+}
+
+// ==================== AHEM Provider ====================
+// Ad-Hoc Email Server，无需认证，无需创建账号，任意前缀直接收信
+// 项目：https://github.com/o4oren/Ad-Hoc-Email-Server
+
+func (p *registerAhemProvider) apiBase() string {
+	return strings.TrimRight(util.Clean(p.entry["api_base"]), "/")
+}
+
+func (p *registerAhemProvider) CreateMailbox(username string) (map[string]any, error) {
+	apiBase := p.apiBase()
+	if apiBase == "" {
+		return nil, fmt.Errorf("ahem api_base is required")
+	}
+
+	// 获取域名（配置的或从 API 获取）
+	domains := util.AsStringSlice(p.entry["domain"])
+	var selectedDomain string
+	if len(domains) > 0 {
+		selectedDomain = domains[rand.Intn(len(domains))]
+	} else {
+		// 从 /api/properties 获取支持的域名列表
+		available, err := p.FetchAvailableDomains()
+		if err != nil || len(available) == 0 {
+			return nil, fmt.Errorf("ahem: no available domain")
+		}
+		selectedDomain = available[rand.Intn(len(available))]
+	}
+
+	// 生成随机前缀（AHEM 无需创建账号，直接用即可）
+	prefix := strings.ToLower(firstNonEmpty(strings.TrimSpace(username), registerRandomMailboxName()))
+	address := prefix + "@" + selectedDomain
+
+	return map[string]any{
+		"provider":     "ahem",
+		"provider_ref": p.entry["provider_ref"],
+		"address":      address,
+		"domain":       selectedDomain,
+		"prefix":       prefix,
+		"api_base":     apiBase,
+	}, nil
+}
+
+func (p *registerAhemProvider) FetchLatestMessage(mailbox map[string]any) (map[string]any, error) {
+	apiBase := util.Clean(mailbox["api_base"])
+	prefix := util.Clean(mailbox["prefix"])
+	if apiBase == "" || prefix == "" {
+		return nil, fmt.Errorf("ahem: missing api_base or prefix")
+	}
+
+	// 获取邮件列表
+	listData, err := registerMailRequestAny(p.client, http.MethodGet, apiBase+"/api/mailbox/"+prefix+"/email", map[string]string{
+		"User-Agent": p.conf.UserAgent,
+		"Accept":     "application/json",
+	}, nil, nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+
+	items := util.AsMapSlice(listData)
+	if len(items) == 0 {
+		return nil, nil
+	}
+
+	// 取最新一封（按 timestamp 降序，取第一个）
+	latest := items[0]
+	for _, item := range items[1:] {
+		if util.ToInt(item["timestamp"], 0) > util.ToInt(latest["timestamp"], 0) {
+			latest = item
+		}
+	}
+
+	emailID := util.Clean(latest["emailId"])
+	if emailID == "" {
+		return nil, nil
+	}
+
+	// 获取邮件详情
+	detailData, err := registerMailRequestJSON(p.client, http.MethodGet, apiBase+"/api/mailbox/"+prefix+"/email/"+emailID, map[string]string{
+		"User-Agent": p.conf.UserAgent,
+		"Accept":     "application/json",
+	}, nil, nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+
+	// 提取正文：优先 text，其次 html（html 为 false 时表示无 HTML）
+	textContent := util.Clean(detailData["text"])
+	htmlContent := ""
+	if h, ok := detailData["html"].(string); ok {
+		htmlContent = h
+	}
+
+	// 提取发件人
+	from := ""
+	if fromMap, ok := detailData["from"].(map[string]any); ok {
+		from = util.Clean(fromMap["text"])
+	}
+
+	subject := util.Clean(detailData["subject"])
+	if textContent == "" && htmlContent == "" {
+		return nil, nil
+	}
+
+	return map[string]any{
+		"provider":     "ahem",
+		"mailbox":      util.Clean(mailbox["address"]),
+		"message_id":   emailID,
+		"subject":      subject,
+		"sender":       from,
+		"text_content": textContent,
+		"html_content": htmlContent,
+		"received_at":  firstNonNil(detailData["timestamp"]),
+		"raw":          detailData,
+	}, nil
+}
+
+func (p *registerAhemProvider) FetchAvailableDomains() ([]string, error) {
+	apiBase := p.apiBase()
+	if apiBase == "" {
+		return nil, fmt.Errorf("ahem api_base is required")
+	}
+
+	data, err := registerMailRequestJSON(p.client, http.MethodGet, apiBase+"/api/properties", map[string]string{
+		"User-Agent": p.conf.UserAgent,
+		"Accept":     "application/json",
+	}, nil, nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+
+	return util.AsStringSlice(data["allowedDomains"]), nil
 }

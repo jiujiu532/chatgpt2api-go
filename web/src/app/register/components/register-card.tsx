@@ -58,6 +58,7 @@ export function RegisterCard() {
       ...(type === "mail_gw" ? { api_base: "", domain: [] } : {}),
       ...(type === "guerrilla_mail" ? { api_base: "" } : {}),
       ...(type === "stalwart" ? { api_base: "", api_key: "", domain: [] } : {}),
+      ...(type === "ahem" ? { api_base: "", domain: [] } : {}),
     });
   };
 
@@ -179,7 +180,7 @@ export function RegisterCard() {
                     ? "每行一个基础域名，系统会自动生成随机子域名"
                     : type === "tempmail_lol"
                       ? "每行一个域名，留空则从服务可用域名中随机分配"
-                      : type === "duckmail" || type === "yyds_mail" || type === "moemail" || type === "cloudflare_temp_email" || type === "mail_tm" || type === "mail_gw" || type === "stalwart"
+                      : type === "duckmail" || type === "yyds_mail" || type === "moemail" || type === "cloudflare_temp_email" || type === "mail_tm" || type === "mail_gw" || type === "stalwart" || type === "ahem"
                         ? "每行一个域名，留空则从服务获取可用域名随机使用"
                         : "每行一个域名";
                 return (
@@ -219,13 +220,14 @@ export function RegisterCard() {
                             <SelectItem value="mail_gw">mail_gw</SelectItem>
                             <SelectItem value="guerrilla_mail">guerrilla_mail</SelectItem>
                             <SelectItem value="stalwart">stalwart</SelectItem>
+                            <SelectItem value="ahem">ahem</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
-                      {type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "mail_tm" || type === "mail_gw" || type === "guerrilla_mail" || type === "stalwart" ? (
+                      {type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "mail_tm" || type === "mail_gw" || type === "guerrilla_mail" || type === "stalwart" || type === "ahem" ? (
                         <div className="space-y-2">
                           <label className="text-sm text-stone-700">API Base</label>
-                          <Input value={String(provider.api_base || "")} onChange={(event) => updateProvider(index, { api_base: event.target.value })} placeholder={type === "mail_tm" ? "https://api.mail.tm" : type === "mail_gw" ? "https://api.mail.gw" : type === "guerrilla_mail" ? "https://api.guerrillamail.com" : type === "stalwart" ? "https://mail.example.com" : ""} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                          <Input value={String(provider.api_base || "")} onChange={(event) => updateProvider(index, { api_base: event.target.value })} placeholder={type === "mail_tm" ? "https://api.mail.tm" : type === "mail_gw" ? "https://api.mail.gw" : type === "guerrilla_mail" ? "https://api.guerrillamail.com" : type === "stalwart" ? "https://mail.example.com" : type === "ahem" ? "https://mail.example.com" : ""} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
                         </div>
                       ) : null}
                       {type === "cloudflare_temp_email" ? (
@@ -274,7 +276,7 @@ export function RegisterCard() {
                       ) : null}
                     </div>
 
-                    {type === "tempmail_lol" || type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "mail_tm" || type === "mail_gw" || type === "stalwart" ? (
+                    {type === "tempmail_lol" || type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "mail_tm" || type === "mail_gw" || type === "stalwart" || type === "ahem" ? (
                       <div className="space-y-2">
                         <label className="text-sm text-stone-700">{type === "inbucket" ? "基础域名列表" : "Domain"}</label>
                         <Textarea value={domains} onChange={(event) => updateProvider(index, { domain: event.target.value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean) })} placeholder={domainPlaceholder} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
