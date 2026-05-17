@@ -148,6 +148,18 @@ type registerStalwartProvider struct {
 	entry map[string]any
 }
 
+// stalwart 域名映射缓存（全局，避免高并发下重复查询）
+var (
+	stalwartDomainCacheMu      sync.Mutex
+	stalwartDomainCacheData    map[string]map[string]string // apiBase -> domain->id
+	stalwartDomainCacheFetched map[string]time.Time
+)
+
+func init() {
+	stalwartDomainCacheData = map[string]map[string]string{}
+	stalwartDomainCacheFetched = map[string]time.Time{}
+}
+
 func createRegisterMailbox(mailConfig map[string]any, username string) (map[string]any, error) {
 	provider, err := createRegisterMailProvider(mailConfig, "", "")
 	if err != nil {
@@ -2075,8 +2087,19 @@ func (p *registerStalwartProvider) CreateMailbox(username string) (map[string]an
 	}, nil
 }
 
-// fetchDomainMap 获取 Stalwart 的域名列表，返回 domain->id 的映射
+// fetchDomainMap 获取 Stalwart 的域名列表，返回 domain->id 的映射（带 10 分钟缓存）
 func (p *registerStalwartProvider) fetchDomainMap(apiBase, apiKey string) (map[string]string, error) {
+	stalwartDomainCacheMu.Lock()
+	// 检查缓存是否有效（10 分钟内）
+	if cached, ok := stalwartDomainCacheData[apiBase]; ok {
+		if fetched, ok2 := stalwartDomainCacheFetched[apiBase]; ok2 && time.Since(fetched) < 10*time.Minute {
+			stalwartDomainCacheMu.Unlock()
+			return cached, nil
+		}
+	}
+	stalwartDomainCacheMu.Unlock()
+
+	// 缓存过期或不存在，重新查询
 	payload := map[string]any{
 		"using": []string{"urn:ietf:params:jmap:core", "urn:stalwart:jmap"},
 		"methodCalls": []any{
@@ -2121,6 +2144,11 @@ func (p *registerStalwartProvider) fetchDomainMap(apiBase, apiKey string) (map[s
 			}
 		}
 	}
+	// 保存到缓存
+	stalwartDomainCacheMu.Lock()
+	stalwartDomainCacheData[apiBase] = result
+	stalwartDomainCacheFetched[apiBase] = time.Now()
+	stalwartDomainCacheMu.Unlock()
 	return result, nil
 }
 
