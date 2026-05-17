@@ -2610,18 +2610,37 @@ func (p *registerAhemProvider) CreateMailbox(username string) (map[string]any, e
 		return nil, fmt.Errorf("ahem api_base is required")
 	}
 
-	// 获取域名（配置的或从 API 获取）
-	domains := util.AsStringSlice(p.entry["domain"])
+	// 获取域名（配置的或从 API 获取），同时用声誉系统过滤拉黑域名
+	configDomains := util.AsStringSlice(p.entry["domain"])
 	var selectedDomain string
-	if len(domains) > 0 {
-		selectedDomain = domains[rand.Intn(len(domains))]
-	} else {
-		// 从 /api/properties 获取支持的域名列表
-		available, err := p.FetchAvailableDomains()
-		if err != nil || len(available) == 0 {
-			return nil, fmt.Errorf("ahem: no available domain")
+
+	if len(configDomains) > 0 {
+		// 用声誉系统过滤掉被拉黑的域名
+		var filteredDomains []string
+		if GlobalDomainReputation != nil {
+			filteredDomains = GlobalDomainReputation.FilterDomains("ahem", configDomains)
+		} else {
+			filteredDomains = configDomains
 		}
-		selectedDomain = available[rand.Intn(len(available))]
+		if len(filteredDomains) == 0 {
+			filteredDomains = configDomains // 全被拉黑时降级使用全部
+		}
+		selectedDomain = filteredDomains[rand.Intn(len(filteredDomains))]
+	} else {
+		// 未配置域名：先用历史好域名，再从 API 获取
+		if GlobalDomainReputation != nil {
+			goodDomains := GlobalDomainReputation.GoodDomains("ahem")
+			if len(goodDomains) > 0 {
+				selectedDomain = goodDomains[rand.Intn(minInt(len(goodDomains), 5))]
+			}
+		}
+		if selectedDomain == "" {
+			available, err := p.FetchAvailableDomains()
+			if err != nil || len(available) == 0 {
+				return nil, fmt.Errorf("ahem: no available domain")
+			}
+			selectedDomain = available[rand.Intn(len(available))]
+		}
 	}
 
 	// 生成随机前缀（AHEM 无需创建账号，直接用即可）
